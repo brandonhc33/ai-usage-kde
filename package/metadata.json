@@ -1,0 +1,20 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Brandon Hernandez Cofre"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Muestra los límites de uso de Codex y Claude usando sus fuentes estructuradas con fallback web",
+        "EnabledByDefault": true,
+        "Icon": "ai-orb",
+        "Id": "com.github.brandonhc33.ai-usage-kde",
+        "License": "MIT",
+        "Name": "AI Usage",
+        "Version": "0.2.0",
+        "Website": "https://github.com/brandonhc33/ai-usage-applet"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AI usage collector every 2 minutes
+
+[Timer]
+OnStartupSec=30s
+OnUnitInactiveSec=2min
+Persistent=true
+Unit=ai-usage-collector.service
+
+[Install]
+WantedBy=timers.target

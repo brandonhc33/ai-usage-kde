@@ -1,0 +1,14 @@
+# Node.js collector dependencies
+scripts/node_modules/
+npm-debug.log*
+
+# Never commit real usage status, debug captures, or session profiles.
+# These live under ~/.cache and ~/.config and are never part of the repo,
+# but are ignored here too in case they're generated locally during testing.
+status.json
+last-good-status.json
+codex.json
+claude.json
+last-error.json
+debug-*.txt
+profiles/

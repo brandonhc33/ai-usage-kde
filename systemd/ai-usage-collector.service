@@ -1,0 +1,11 @@
+[Unit]
+Description=AI usage status collector
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Environment=AI_USAGE_QUIET=1
+ExecStart=%h/.local/bin/ai-usage-collect
+TimeoutStartSec=3min
+UMask=0077
