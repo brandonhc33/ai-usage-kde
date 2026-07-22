@@ -3,7 +3,10 @@ import { chromium } from 'playwright';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { clearStaleSingletonLock } from './lib/chrome-profile.mjs';
+import {
+  clearStaleSingletonLock,
+  resolveBrowserLaunchOptions,
+} from './lib/chrome-profile.mjs';
 
 const HOME = os.homedir();
 const provider = process.argv[2];
@@ -33,12 +36,13 @@ async function main() {
   const selected = providers[provider];
   await fs.mkdir(selected.profileDir, { recursive: true, mode: 0o700 });
   await clearStaleSingletonLock(selected.profileDir);
+  const browserLaunchOptions = await resolveBrowserLaunchOptions();
 
   const context = await chromium.launchPersistentContext(selected.profileDir, {
     // Usa el Chrome real del sistema (no el Chromium de Playwright): pasa los
     // chequeos "Verify you are human" / Private Access Token de Cloudflare
     // que bloquean al Chromium automatizado.
-    channel: 'chrome',
+    ...browserLaunchOptions,
     headless: false,
     viewport: { width: 1280, height: 900 },
     args: ['--disable-blink-features=AutomationControlled'],

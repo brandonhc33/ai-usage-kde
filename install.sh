@@ -21,6 +21,12 @@ for cmd in node npm kpackagetool6; do
   fi
 done
 
+NODE_MAJOR="$(node -p "Number(process.versions.node.split('.')[0])")"
+if [ "$NODE_MAJOR" -lt 18 ]; then
+  echo "error: AI Usage requiere Node.js 18 o posterior (encontrado: $(node --version))." >&2
+  exit 1
+fi
+
 # Resuelve el binario real antes de crear enlaces. `command -v node` puede
 # devolver ~/.local/bin/node en una reinstalación; enlazar ese path sobre sí
 # mismo produciría un loop. También repara un loop dejado por versiones
@@ -42,7 +48,7 @@ mkdir -p ~/.local/bin
 ln -sf "$NODE_BIN" ~/.local/bin/node
 
 browser=""
-for candidate in google-chrome-stable google-chrome chromium; do
+for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
   if command -v "$candidate" >/dev/null 2>&1; then
     browser="$candidate"
     break
@@ -148,7 +154,7 @@ cat <<'EOF'
 1. Ejecutá el diagnóstico seguro (no imprime tokens ni cookies):
      ai-usage-doctor
 2. Solo si falta una fuente estructurada y el fallback web pide login, abrí el
-   popup y usá "Iniciar sesión Codex/Claude".
+   popup y usá "Configurar Codex/Claude".
 3. Xvfb es opcional para ejecutar el fallback web sin una ventana visible:
      sudo pacman -S xorg-server-xvfb
 EOF

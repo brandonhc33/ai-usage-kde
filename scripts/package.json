@@ -1,6 +1,6 @@
 {
   "name": "ai-usage-status-collector",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Structured Codex/Claude usage collector with a Playwright fallback for the AI Usage KDE widget",

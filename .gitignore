@@ -1,6 +1,7 @@
 # Node.js collector dependencies
 scripts/node_modules/
 npm-debug.log*
+/dist/
 
 # Never commit real usage status, debug captures, or session profiles.
 # These live under ~/.cache and ~/.config and are never part of the repo,

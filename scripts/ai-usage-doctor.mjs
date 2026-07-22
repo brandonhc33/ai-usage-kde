@@ -62,13 +62,23 @@ const oauthDetail = !credentials
     : 'ausente, expirado o sin scope user:profile; se usará fallback web';
 result(oauthValid, 'Claude OAuth', oauthDetail, false);
 
-const browser = findExecutable(['google-chrome-stable', 'google-chrome', 'chromium']);
+const browser = findExecutable([
+  'google-chrome-stable',
+  'google-chrome',
+  'chromium',
+  'chromium-browser',
+]);
 result(Boolean(browser), 'Chrome/Chromium (fallback)', browser ?? 'no encontrado', false);
 result(Boolean(codex || browser), 'Fuente utilizable para Codex', codex ? 'CLI estructurado' : browser ? 'fallback web' : 'ninguna');
 result(Boolean(oauthValid || browser), 'Fuente utilizable para Claude', oauthValid ? 'OAuth estructurado' : browser ? 'fallback web' : 'ninguna');
 
 const xvfb = findExecutable(['Xvfb']);
-result(Boolean(xvfb), 'Xvfb (fallback invisible)', xvfb ?? 'opcional: sudo pacman -S xorg-server-xvfb', false);
+result(
+  Boolean(xvfb),
+  'Xvfb (fallback invisible)',
+  xvfb ?? 'opcional: instala xorg-server-xvfb (Arch) o xvfb (Debian/Ubuntu)',
+  false,
+);
 
 const qtPluginRoots = ['/usr/lib/qt6/plugins', '/usr/lib64/qt6/plugins'];
 const qtpaths = findExecutable(['qtpaths6']);

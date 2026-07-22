@@ -7,14 +7,17 @@
             }
         ],
         "Category": "System Information",
-        "Description": "Muestra los límites de uso de Codex y Claude usando sus fuentes estructuradas con fallback web",
+        "BugReportUrl": "https://github.com/brandonhc33/ai-usage-kde/issues",
+        "Description": "Monitor Codex and Claude usage limits from the KDE Plasma panel",
+        "Description[es]": "Monitorea los límites de uso de Codex y Claude desde el panel de KDE Plasma",
         "EnabledByDefault": true,
-        "Icon": "ai-orb",
+        "Icon": "ai-orb.svg",
         "Id": "com.github.brandonhc33.ai-usage-kde",
         "License": "MIT",
         "Name": "AI Usage",
-        "Version": "0.2.0",
-        "Website": "https://github.com/brandonhc33/ai-usage-applet"
+        "Name[es]": "AI Usage",
+        "Version": "0.3.0",
+        "Website": "https://github.com/brandonhc33/ai-usage-kde"
     },
     "X-Plasma-API-Minimum-Version": "6.0"
 }

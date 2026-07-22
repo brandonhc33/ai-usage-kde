@@ -1,9 +1,16 @@
-# 07 — Instalación en Arch/CachyOS y systemd
+# 07 — Instalación completa opcional y systemd
+
+La instalación normal desde KDE Store no necesita este procedimiento: el
+archivo `.plasmoid` incluye el colector estructurado y QML actualiza cada dos
+minutos. Esta guía corresponde a la modalidad avanzada con fallback web y
+timer de systemd.
 
 ## Paquetes
 
+### Arch Linux, CachyOS y Manjaro
+
 ```bash
-sudo pacman -S --needed nodejs npm plasma-sdk qt6-tools
+sudo pacman -S --needed nodejs npm plasma-sdk plasma5support qt6-tools
 ```
 
 Para el fallback web invisible:
@@ -11,6 +18,22 @@ Para el fallback web invisible:
 ```bash
 sudo pacman -S --needed xorg-server-xvfb
 ```
+
+### Debian 13 y Ubuntu/Kubuntu con Plasma 6
+
+```bash
+sudo apt update
+sudo apt install nodejs npm plasma-sdk \
+  qml6-module-org-kde-plasma-plasma5support qt6-tools-dev-tools
+```
+
+Para el fallback web invisible:
+
+```bash
+sudo apt install chromium xvfb
+```
+
+Ubuntu/Kubuntu 24.04 usa Plasma 5 y no es compatible con este plasmoide.
 
 Chrome/Chromium solo es obligatorio para autenticación y fallback. El camino
 normal con Codex CLI + Claude OAuth no inicia navegador.

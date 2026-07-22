@@ -37,6 +37,7 @@ PlasmoidItem {
     property var statusState: ({ kind: "missing", data: null })
     property bool collectorRunningFlag: false
     property bool loading: false
+    property bool collectorLaunchFailed: false
     readonly property bool isLoading: loading || collectorRunningFlag
     readonly property bool errorLogHasEntries: errorLogSize > 0
     readonly property bool hasActiveErrors: statusState.kind === "loaded"
@@ -57,6 +58,10 @@ PlasmoidItem {
 
     function shellQuote(value) {
         return "'" + String(value).replace(/'/g, "'\\''") + "'";
+    }
+
+    function localFilePath(url) {
+        return decodeURIComponent(String(url).replace(/^file:\/\/(localhost)?/, ""));
     }
 
     readonly property string readStatusCmd: "/usr/bin/cat -- " + shellQuote(statusPath)
@@ -97,12 +102,30 @@ PlasmoidItem {
     // external collector/auth scripts, same boundary as the COSMIC applet
     // (see docs/02-architecture.md in the sibling ai-usage project).
 
-    // Plasma corre el motor "executable" con el PATH del propio proceso
-    // plasmashell (normalmente sin ~/.local/bin), así que estos tres scripts
-    // se invocan por ruta absoluta en vez de confiar en la resolución de PATH.
+    // The KDE Store archive bundles the dependency-free structured collector
+    // under contents/tools. A source checkout installed with install.sh keeps
+    // using ~/.local/bin, which additionally provides the Playwright fallback
+    // and a systemd timer.
     readonly property string localBinDir: homeDir + "/.local/bin"
-    readonly property string collectCmd: localBinDir + "/ai-usage-collect"
-    readonly property string clearErrorsCmd: localBinDir + "/ai-usage-clear-errors"
+    readonly property string bundledCollectPath: localFilePath(
+        Qt.resolvedUrl("../tools/ai-usage-collect.mjs"))
+    readonly property string bundledClearErrorsPath: localFilePath(
+        Qt.resolvedUrl("../tools/ai-usage-clear-errors.mjs"))
+    readonly property string installedCollectPath: localBinDir + "/ai-usage-collect"
+    readonly property string installedClearErrorsPath: localBinDir + "/ai-usage-clear-errors"
+
+    readonly property string collectCmd: "/bin/sh -c " + shellQuote(
+        "if [ -f " + shellQuote(bundledCollectPath) + " ]; then "
+        + "exec /usr/bin/env AI_USAGE_STRUCTURED_ONLY=1 node " + shellQuote(bundledCollectPath) + "; "
+        + "elif [ -x " + shellQuote(installedCollectPath) + " ]; then "
+        + "exec " + shellQuote(installedCollectPath) + "; "
+        + "else exit 127; fi")
+    readonly property string clearErrorsCmd: "/bin/sh -c " + shellQuote(
+        "if [ -f " + shellQuote(bundledClearErrorsPath) + " ]; then "
+        + "exec /usr/bin/env node " + shellQuote(bundledClearErrorsPath) + "; "
+        + "elif [ -x " + shellQuote(installedClearErrorsPath) + " ]; then "
+        + "exec " + shellQuote(installedClearErrorsPath) + "; "
+        + "else exit 127; fi")
 
     P5Support.DataSource {
         id: executable
@@ -111,6 +134,7 @@ PlasmoidItem {
         onNewData: (sourceName, data) => {
             disconnectSource(sourceName);
             if (sourceName === root.collectCmd) {
+                root.collectorLaunchFailed = Number(data["exit code"]) !== 0;
                 root.loading = false;
                 root.reload();
             } else if (sourceName === root.clearErrorsCmd) {
@@ -124,12 +148,18 @@ PlasmoidItem {
 
     function runCollector() {
         if (root.isLoading) return;
+        root.collectorLaunchFailed = false;
         root.loading = true;
         executable.exec(root.collectCmd);
     }
 
-    function runLogin(provider) {
-        executable.exec(root.localBinDir + "/ai-usage-auth " + provider);
+    function runLogin(provider, url) {
+        var installedAuthPath = root.localBinDir + "/ai-usage-auth";
+        var command = "/bin/sh -c " + shellQuote(
+            "if [ -x " + shellQuote(installedAuthPath) + " ]; then "
+            + "exec " + shellQuote(installedAuthPath) + " " + shellQuote(provider) + "; "
+            + "else exec xdg-open " + shellQuote(url) + "; fi");
+        executable.exec(command);
     }
 
     function openLink(url) {
@@ -156,12 +186,20 @@ PlasmoidItem {
         if (sessionActive(provider)) {
             openLink(url);
         } else {
-            runLogin(provider);
+            runLogin(provider, url);
         }
     }
 
     function iconSource(kind) {
         return Qt.resolvedUrl("../icons/" + kind + "-orb.svg");
+    }
+
+    Timer {
+        interval: 2 * 60 * 1000
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: root.runCollector()
     }
 
     // --- Compact representation (panel button) --------------------------
@@ -236,7 +274,9 @@ PlasmoidItem {
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
-                text: "Ejecuta ai-usage-collect para generar datos."
+                text: root.collectorLaunchFailed
+                    ? "No se pudo iniciar el colector. Instala Node.js 18 o posterior."
+                    : "La primera lectura se generará automáticamente."
             }
         }
 
@@ -322,7 +362,7 @@ PlasmoidItem {
                     Layout.leftMargin: Kirigami.Units.largeSpacing
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
-                    text: "No se obtuvo la información."
+                    text: "No se obtuvo la información. Verifica Codex CLI y ejecuta codex login."
                 }
             }
 
@@ -432,7 +472,7 @@ PlasmoidItem {
                     Layout.leftMargin: Kirigami.Units.largeSpacing
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
-                    text: "No se obtuvo la información."
+                    text: "No se obtuvo la información. Verifica la sesión local de Claude Code."
                 }
             }
 
@@ -504,12 +544,12 @@ PlasmoidItem {
 
                 QQC2.Button {
                     Layout.fillWidth: true
-                    text: root.sessionActive("codex") ? "Ir a Codex" : "Iniciar sesión Codex"
+                    text: root.sessionActive("codex") ? "Ir a Codex" : "Configurar Codex"
                     onClicked: root.providerAction("codex", root.codexUsageUrl)
                 }
                 QQC2.Button {
                     Layout.fillWidth: true
-                    text: root.sessionActive("claude") ? "Ir a Claude" : "Iniciar sesión Claude"
+                    text: root.sessionActive("claude") ? "Ir a Claude" : "Configurar Claude"
                     onClicked: root.providerAction("claude", root.claudeUsageUrl)
                 }
             }

@@ -11,8 +11,8 @@ function hasXvfb() {
 }
 
 /**
- * Cloudflare's bot check blocks Chrome's headless mode (even with
- * `channel: 'chrome'` and anti-automation flags), but passes headed mode.
+ * Cloudflare's bot check can block Chrome/Chromium headless mode even with
+ * anti-automation flags, but passes headed mode.
  * When Xvfb is installed, run headed Chrome inside a throwaway virtual
  * display so it's invisible to the user but still looks "headed" to
  * Cloudflare. Falls back to the caller's own headless setting if Xvfb isn't

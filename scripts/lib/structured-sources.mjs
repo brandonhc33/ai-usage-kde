@@ -228,7 +228,7 @@ function readCodexAppServer(command, timeoutMs) {
         clientInfo: {
           name: 'ai_usage_kde',
           title: 'AI Usage KDE',
-          version: '0.2.0',
+          version: '0.3.0',
         },
       },
     });

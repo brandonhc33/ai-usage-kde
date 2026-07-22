@@ -16,6 +16,11 @@ check:
     qmllint package/contents/ui/*.qml
     cd scripts && npm test
     find scripts -path '*/node_modules' -prune -o -name '*.mjs' -print0 | xargs -0 -n1 node --check
+    bash -n install.sh scripts/build-plasmoid.sh
+
+# Build the self-contained archive uploaded to KDE Store
+package-store: check
+    ./scripts/build-plasmoid.sh
 
 # Install the widget, collector and user timer
 setup:

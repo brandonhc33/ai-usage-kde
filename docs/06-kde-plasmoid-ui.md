@@ -19,19 +19,27 @@ acciones explícitas del usuario.
 
 ## Límite de responsabilidades
 
-El QML no conoce credenciales ni consulta proveedores:
+El QML no conoce credenciales ni consulta proveedores. La edición publicada
+en KDE Store incluye el colector estructurado dentro del propio KPackage:
 
 ```text
+Codex CLI / Claude OAuth ── colector Node incluido
+                                      │
+                                      ▼
 status.json ── Data Engine executable ── QML
                                            │
-                                           ├─ actualizar colector
-                                           ├─ abrir URL/log
-                                           └─ iniciar auth web
+                                           ├─ actualizar cada 2 minutos
+                                           ├─ actualizar manualmente
+                                           └─ abrir URL/log
 ```
 
 El colector Node es responsable de red, OAuth, procesos CLI, Playwright, locks,
 fallback y escritura atómica. Mantener ese trabajo fuera de `plasmashell`
 reduce el riesgo de bloquear o derribar el panel.
+
+En KDE Store se ejecuta con `AI_USAGE_STRUCTURED_ONLY=1`: no requiere
+Playwright, navegador ni systemd. La instalación completa desde el repositorio
+conserva el timer de systemd y el fallback web como opciones avanzadas.
 
 ## Lectura y refresco
 
@@ -47,6 +55,10 @@ QML no expone una API general de filesystem. Además, Qt 6 bloquea por defecto
 El motor mantiene esas fuentes conectadas y las actualiza cada cinco segundos.
 El colector reemplaza los JSON de manera atómica, así que la UI observa el
 snapshot anterior o el nuevo, nunca uno parcialmente escrito.
+
+Un `Timer` QML solicita una nueva lectura cada dos minutos. El lock del
+colector evita carreras si existen varias instancias del widget o también está
+habilitado el timer opcional de systemd.
 
 Un backend C++ con `QFileSystemWatcher` sería razonable si el widget creciera o
 necesitara eventos instantáneos. Para tres archivos pequeños actualizados cada

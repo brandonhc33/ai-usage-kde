@@ -2,7 +2,10 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { clearStaleSingletonLock } from './lib/chrome-profile.mjs';
+import {
+  clearStaleSingletonLock,
+  resolveBrowserLaunchOptions,
+} from './lib/chrome-profile.mjs';
 import { fetchClaudeOAuth, fetchCodexCli } from './lib/structured-sources.mjs';
 import { withDisplay } from './lib/xvfb.mjs';
 import {
@@ -14,7 +17,8 @@ import {
 
 const HOME = os.homedir();
 const CACHE_DIR = path.join(HOME, '.cache', 'ai-usage-status');
-const CONFIG_FILE = path.join(HOME, '.config', 'ai-usage-status', 'config.json');
+const CONFIG_DIR = path.join(HOME, '.config', 'ai-usage-status');
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const OUT_FILE = path.join(CACHE_DIR, 'status.json');
 const LAST_GOOD_FILE = path.join(CACHE_DIR, 'last-good-status.json');
 const LOCK_FILE = path.join(CACHE_DIR, 'collector.lock');
@@ -81,6 +85,18 @@ function normalizeConfig(value) {
       claude: { ...DEFAULT_CONFIG.providers.claude, ...config.providers?.claude },
     },
   };
+}
+
+async function ensureDefaultConfig() {
+  await fs.mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  try {
+    await fs.writeFile(CONFIG_FILE, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  }
 }
 
 function classifyError(error) {
@@ -199,13 +215,14 @@ async function scrapeProvider(name, providerConfig, parser, readyPattern) {
     const { chromium } = await import('playwright');
     await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
     await clearStaleSingletonLock(profileDir);
+    const browserLaunchOptions = await resolveBrowserLaunchOptions();
 
     const text = await withDisplay(async (display) => {
       const context = await chromium.launchPersistentContext(profileDir, {
         // Mismo motivo que en ai-usage-auth.mjs: el Chrome real evita los
         // desafíos "Verify you are human" de Cloudflare que bloquean al
         // Chromium de Playwright.
-        channel: 'chrome',
+        ...browserLaunchOptions,
         headless: display.headless ?? providerConfig.headless !== false,
         viewport: { width: 1280, height: 900 },
         args: ['--disable-blink-features=AutomationControlled', ...(display.args ?? [])],
@@ -254,7 +271,10 @@ async function collectProvider(
   parser,
   readyPattern,
 ) {
-  const source = providerConfig.source ?? 'auto';
+  const configuredSource = providerConfig.source ?? 'auto';
+  const source = process.env.AI_USAGE_STRUCTURED_ONLY === '1' && configuredSource === 'auto'
+    ? structuredSource
+    : configuredSource;
   const allowedSources = new Set(['auto', structuredSource, 'web']);
   if (!allowedSources.has(source)) {
     const error = Object.assign(
@@ -546,6 +566,7 @@ async function writeAtomic(file, data) {
 
 async function main() {
   await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
+  await ensureDefaultConfig();
   const releaseLock = await acquireCollectorLock();
   if (!releaseLock) return;
 
