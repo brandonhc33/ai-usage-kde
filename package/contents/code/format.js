@@ -94,6 +94,7 @@ function windowSeverity(metric, thresholds) {
 
 var DEFAULT_PANEL_OPTIONS = {
     preset: "used",
+    resetTimeFormat: "duration",
     template: "{used}",
     showWeekly: false,
     showWeeklyReset: false,
@@ -176,6 +177,16 @@ function providerTemplate(options, values) {
     if (options.preset === "custom") return options.template;
 
     var template = PANEL_PRESETS[options.preset] || PANEL_PRESETS.used;
+    var resetTemplate = "{reset_in}";
+    if (options.resetTimeFormat === "clock") {
+        resetTemplate = "{reset_at}";
+    } else if (options.resetTimeFormat === "both" && values.tokens.reset_at
+        && values.tokens.reset_at.text !== "—") {
+        // Idle sessions have no reset yet; do not repeat the placeholder.
+        // Older snapshots can have a countdown without a clock time.
+        resetTemplate = values.tokens.reset_in ? "{reset_in} · {reset_at}" : "{reset_at}";
+    }
+    template = template.replace("{reset_in}", resetTemplate);
     if (values.shortIsWeekly) template = "S " + template;
 
     var weekly = [];

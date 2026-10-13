@@ -10,6 +10,10 @@
     <entry name="panelPreset" type="String">
       <default>used</default>
     </entry>
+    <!-- duration | clock | both; applies to presets that show the reset. -->
+    <entry name="resetTimeFormat" type="String">
+      <default>duration</default>
+    </entry>
     <!-- Only for panelPreset=custom; tokens documented in format.js. -->
     <entry name="panelTemplate" type="String">
       <default>{used} · {reset_in}</default>

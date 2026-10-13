@@ -63,6 +63,7 @@ PlasmoidItem {
 
     readonly property var panelOptions: ({
         preset: Plasmoid.configuration.panelPreset,
+        resetTimeFormat: Plasmoid.configuration.resetTimeFormat,
         template: Plasmoid.configuration.panelTemplate,
         showWeekly: Plasmoid.configuration.showWeekly,
         showWeeklyReset: Plasmoid.configuration.showWeeklyReset,

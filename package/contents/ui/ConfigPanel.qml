@@ -13,6 +13,7 @@ KCM.SimpleKCM {
     id: page
 
     property string cfg_panelPreset
+    property string cfg_resetTimeFormat
     property alias cfg_panelTemplate: templateField.text
     property alias cfg_showWeekly: showWeeklyBox.checked
     property alias cfg_showWeeklyReset: showWeeklyResetBox.checked
@@ -24,8 +25,11 @@ KCM.SimpleKCM {
     property alias cfg_refreshMinutes: refreshSpin.value
 
     readonly property bool custom: cfg_panelPreset === "custom"
+    readonly property bool showsReset: cfg_panelPreset === "time"
+        || cfg_panelPreset === "used_time" || cfg_panelPreset === "remaining_time"
     readonly property string preview: Format.panelPreview({
         preset: cfg_panelPreset,
+        resetTimeFormat: cfg_resetTimeFormat,
         template: cfg_panelTemplate,
         showWeekly: cfg_showWeekly,
         showWeeklyReset: cfg_showWeeklyReset,
@@ -45,13 +49,29 @@ KCM.SimpleKCM {
             model: [
                 { value: "used", text: "% usado" },
                 { value: "remaining", text: "% restante" },
-                { value: "time", text: "Tiempo hasta el reinicio" },
-                { value: "used_time", text: "% usado + tiempo" },
-                { value: "remaining_time", text: "% restante + tiempo" },
+                { value: "time", text: "Reinicio de sesión" },
+                { value: "used_time", text: "% usado + reinicio" },
+                { value: "remaining_time", text: "% restante + reinicio" },
                 { value: "custom", text: "Personalizado" }
             ]
             onActivated: page.cfg_panelPreset = currentValue
             Component.onCompleted: currentIndex = Math.max(0, indexOfValue(page.cfg_panelPreset))
+        }
+
+        QQC2.ComboBox {
+            id: resetTimeCombo
+            visible: !page.custom
+            enabled: page.showsReset
+            Kirigami.FormData.label: "Mostrar reinicio como:"
+            textRole: "text"
+            valueRole: "value"
+            model: [
+                { value: "duration", text: "Tiempo restante (3h56)" },
+                { value: "clock", text: "Hora del reinicio (17:24)" },
+                { value: "both", text: "Tiempo + hora (3h56 · 17:24)" }
+            ]
+            currentIndex: Math.max(0, indexOfValue(page.cfg_resetTimeFormat))
+            onActivated: page.cfg_resetTimeFormat = currentValue
         }
 
         QQC2.TextField {

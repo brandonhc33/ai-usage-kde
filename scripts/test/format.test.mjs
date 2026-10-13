@@ -60,6 +60,50 @@ test('presets show remaining percent and time until reset', () => {
   assert.deepEqual(labels({ preset: 'used_time' }), ['3% · 3h56', '0% · —']);
 });
 
+test('reset presets offer a countdown, local clock time or both for each provider', () => {
+  const state = status();
+  state.data.claude.session = {
+    used_percent: 6, remaining_percent: 94, reset_epoch: NOW_S + 290 * 60, state: 'active',
+  };
+  const formats = [
+    ['duration', ['3h56', '4h50']],
+    ['clock', ['17:24', '18:18']],
+    ['both', ['3h56 · 17:24', '4h50 · 18:18']],
+  ];
+  for (const [resetTimeFormat, resets] of formats) {
+    assert.deepEqual(labels({ preset: 'time', resetTimeFormat }, state), resets);
+    assert.deepEqual(
+      labels({ preset: 'used_time', resetTimeFormat }, state),
+      [`3% · ${resets[0]}`, `6% · ${resets[1]}`],
+    );
+    assert.deepEqual(
+      labels({ preset: 'remaining_time', resetTimeFormat }, state),
+      [`97% · ${resets[0]}`, `94% · ${resets[1]}`],
+    );
+  }
+});
+
+test('reset formats handle idle sessions and snapshots without a reset epoch', () => {
+  assert.deepEqual(labels({ preset: 'time', resetTimeFormat: 'clock' }), ['17:24', '—']);
+  assert.deepEqual(labels({ preset: 'time', resetTimeFormat: 'both' }), ['3h56 · 17:24', '—']);
+
+  const state = status();
+  state.data.codex.five_hour.reset_epoch = null;
+  state.data.codex.five_hour.reset_label = 'en 2 h 33 min';
+  assert.deepEqual(labels({ preset: 'time', resetTimeFormat: 'both' }, state), ['2h33', '—']);
+  assert.deepEqual(labels({ preset: 'time', resetTimeFormat: 'clock' }, state), ['--', '—']);
+  state.data.codex.five_hour.reset_label = null;
+  assert.deepEqual(labels({ preset: 'time', resetTimeFormat: 'both' }, state), ['--', '—']);
+});
+
+test('reset time formatting preserves percentage presets and custom templates', () => {
+  assert.deepEqual(labels({ resetTimeFormat: 'both' }), ['3%', '0%']);
+  assert.deepEqual(
+    labels({ preset: 'custom', template: '{reset_in}', resetTimeFormat: 'clock' }),
+    ['3h56', '—'],
+  );
+});
+
 test('weekly percent and reset day can be added on one or two lines', () => {
   assert.deepEqual(
     labels({ showWeekly: true, showWeeklyReset: true }),
@@ -158,4 +202,11 @@ test('tooltip lists every window without opening the popup', () => {
 test('vertical panels stack every part on its own line', () => {
   const [codex] = Format.panelEntries(status(), { preset: 'used_time', showWeekly: true, stacked: true }, NOW);
   assert.deepEqual(Array.from(codex.lines, (line) => Array.from(line, (s) => s.text).join('')), ['3%', '3h56', 'S 51%']);
+  const [withClock] = Format.panelEntries(status(), {
+    preset: 'used_time', resetTimeFormat: 'both', showWeekly: true, stacked: true,
+  }, NOW);
+  assert.deepEqual(
+    Array.from(withClock.lines, (line) => Array.from(line, (s) => s.text).join('')),
+    ['3%', '3h56', '17:24', 'S 51%'],
+  );
 });
