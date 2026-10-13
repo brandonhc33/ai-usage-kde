@@ -14,27 +14,51 @@ ColumnLayout {
     property string label: ""
     property var metric: null
     property var thresholds: null
+    // Driven by main.qml's clock so the countdown stays current.
+    property double nowMs: Date.now()
 
-    spacing: 0
+    readonly property bool idle: Format.isIdle(metric)
+    readonly property real usedPercent: metric && metric.used_percent !== null
+        && metric.used_percent !== undefined ? Number(metric.used_percent) : 0
+    readonly property color severityColor: Format.severityColor(
+        Format.metricSeverity(metric, thresholds))
+    readonly property string resetText: Format.resetLine(metric, nowMs)
+
+    spacing: Kirigami.Units.smallSpacing
 
     RowLayout {
+        Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
         QQC2.Label {
             text: root.label
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 4
+            font.weight: Font.DemiBold
         }
 
-        QQC2.Label {
+        // Qt Quick Controls can replace a Label's palette when the plasmoid
+        // becomes active. Plain Text keeps this semantic color binding intact.
+        Text {
             text: Format.usageSummary(root.metric)
-            color: Format.severityColor(Format.metricSeverity(root.metric, root.thresholds))
+            color: root.severityColor
+            font: Kirigami.Theme.defaultFont
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignRight
+            verticalAlignment: Text.AlignVCenter
         }
     }
 
-    QQC2.Label {
-        text: Format.resetLabelWithDuration(root.metric)
-        color: Format.RESET_LABEL_COLOR
+    UsageBar {
+        value: root.idle ? 0 : root.usedPercent
+        color: root.severityColor
+    }
+
+    Text {
+        visible: root.resetText.length > 0
+        text: root.resetText
+        color: root.idle ? Format.COLOR_MUTED : Format.RESET_LABEL_COLOR
         font: Kirigami.Theme.smallFont
-        opacity: 0.9
+        opacity: 0.85
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
     }
 }

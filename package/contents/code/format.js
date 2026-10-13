@@ -1,7 +1,11 @@
 .pragma library
 // Turns parsed status data into the strings and colors the UI renders.
-// Direct port of ai-usage/src/format.rs (see docs/06-kde-plasmoid-ui.md for
-// the small differences between the COSMIC applet and this plasmoid).
+// Started as a port of ai-usage/src/format.rs; the configurable panel
+// formats, credits and countdowns are specific to this plasmoid (see
+// docs/06-kde-plasmoid-ui.md).
+//
+// Every function that depends on the current time takes `nowMs` so QML can
+// drive countdowns from a single timer, and so tests can pin the clock.
 
 var WARNING_USED_PERCENT = 51;
 var CRITICAL_USED_PERCENT = 76;
@@ -20,6 +24,21 @@ var Severity = {
     CRITICAL: "critical",
     MUTED: "muted",
     LOGIN_REQUIRED: "login_required"
+};
+
+var WEEKDAYS = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+
+var PROVIDERS = [
+    { key: "codex", name: "Codex", shortKey: "five_hour", shortLabel: "5 horas" },
+    { key: "claude", name: "Claude", shortKey: "session", shortLabel: "Sesión" }
+];
+
+var SOURCE_LABELS = {
+    "codex-cli": "CLI",
+    "claude-oauth": "OAuth",
+    "cli": "CLI",
+    "oauth": "OAuth",
+    "web": "web"
 };
 
 function severityColor(severity) {
@@ -44,101 +63,334 @@ function severityForPercent(usedPercent, thresholds) {
     return Severity.NORMAL;
 }
 
-// One topbar icon/label/severity per enabled provider (mirrors
-// format.rs::topbar_entries). `state` is the object returned by
-// status.js::parseStatusFile.
-function topbarEntries(state) {
+function hasValue(value) {
+    return value !== null && value !== undefined;
+}
+
+function hasPercent(metric) {
+    return !!metric && hasValue(metric.used_percent);
+}
+
+function remainingPercent(metric) {
+    if (!hasPercent(metric)) return null;
+    return hasValue(metric.remaining_percent)
+        ? metric.remaining_percent : Math.max(0, 100 - metric.used_percent);
+}
+
+// A window that has not started yet (no usage and no reset time): it begins
+// with the first message. Snapshots from schema v1 have no `state` field.
+function isIdle(metric) {
+    if (!hasPercent(metric)) return false;
+    if (metric.state) return metric.state === "idle";
+    return Number(metric.used_percent) === 0 && !hasValue(metric.reset_epoch) && !metric.reset_label;
+}
+
+function windowSeverity(metric, thresholds) {
+    if (!hasPercent(metric) || isIdle(metric)) return Severity.MUTED;
+    return severityForPercent(metric.used_percent, thresholds);
+}
+
+// --- Panel (compact representation) --------------------------------------
+
+var DEFAULT_PANEL_OPTIONS = {
+    preset: "used",
+    template: "{used}",
+    showWeekly: false,
+    showWeeklyReset: false,
+    showMoney: false,
+    idleWindow: "dim",
+    twoLines: false,
+    showCodex: true,
+    showClaude: true,
+    // Vertical panels: every " · " part on its own line.
+    stacked: false
+};
+
+var PANEL_PRESETS = {
+    used: "{used}",
+    remaining: "{left}",
+    time: "{reset_in}",
+    used_time: "{used} · {reset_in}",
+    remaining_time: "{left} · {reset_in}"
+};
+
+// Presets that talk about what is left also show the weekly value as left.
+var REMAINING_PRESETS = { remaining: true, remaining_time: true, time: true };
+
+var TOKEN_PATTERN = /\{([a-z_]+)\}/g;
+
+// Plasmoid.configuration (or a partial object) → complete options.
+function panelOptions(raw) {
+    var options = {};
+    for (var key in DEFAULT_PANEL_OPTIONS) {
+        var value = raw ? raw[key] : undefined;
+        options[key] = value === undefined || value === null || value === ""
+            ? DEFAULT_PANEL_OPTIONS[key] : value;
+    }
+    return options;
+}
+
+// Values each template token can take for one provider: `{ text, severity }`
+// or null when the provider does not report it.
+function panelValues(provider, spec, options, thresholds, nowMs) {
+    var short = provider[spec.shortKey];
+    var weekly = provider.weekly;
+    var shortIsWeekly = false;
+
+    // Codex accounts may only have a weekly window; an idle Claude session can
+    // optionally be replaced by the weekly window too.
+    if (!hasPercent(short) && hasPercent(weekly)) {
+        short = weekly;
+        shortIsWeekly = true;
+    } else if (isIdle(short) && options.idleWindow === "weekly" && hasPercent(weekly)) {
+        short = weekly;
+        shortIsWeekly = true;
+    }
+
+    var shortIdle = isIdle(short);
+    var shortSeverity = windowSeverity(short, thresholds);
+    var weeklySeverity = windowSeverity(weekly, thresholds);
+
+    function token(text, severity) {
+        return text === null || text === undefined ? null : { text: text, severity: severity };
+    }
+
+    return {
+        hasShort: hasPercent(short),
+        shortIsWeekly: shortIsWeekly,
+        tokens: {
+            used: token(hasPercent(short) ? percent(short.used_percent) : null, shortSeverity),
+            left: token(hasPercent(short) ? percent(remainingPercent(short)) : null, shortSeverity),
+            reset_in: token(shortIdle ? "—" : compactDuration(metricRemainingMinutes(short, nowMs)), shortSeverity),
+            reset_at: token(shortIdle ? "—" : clockLabel(short ? short.reset_epoch : null), shortSeverity),
+            w_used: token(hasPercent(weekly) ? percent(weekly.used_percent) : null, weeklySeverity),
+            w_left: token(hasPercent(weekly) ? percent(remainingPercent(weekly)) : null, weeklySeverity),
+            w_reset_in: token(isIdle(weekly) ? null : compactDuration(metricRemainingMinutes(weekly, nowMs)), weeklySeverity),
+            w_reset_day: token(weekly && !isIdle(weekly) ? weekdayClockLabel(weekly.reset_epoch) : null, weeklySeverity),
+            money: panelMoney(provider, thresholds)
+        }
+    };
+}
+
+function providerTemplate(options, values) {
+    if (options.preset === "custom") return options.template;
+
+    var template = PANEL_PRESETS[options.preset] || PANEL_PRESETS.used;
+    if (values.shortIsWeekly) template = "S " + template;
+
+    var weekly = [];
+    if (options.showWeekly && !values.shortIsWeekly && values.tokens.w_used) {
+        weekly.push(REMAINING_PRESETS[options.preset] ? "S {w_left}" : "S {w_used}");
+    }
+    if (options.showWeeklyReset && values.tokens.w_reset_day) {
+        weekly.push("{w_reset_day}");
+    }
+    if (weekly.length > 0) {
+        template += (options.twoLines ? "\n" : " · ") + weekly.join(" ");
+    }
+    if (options.showMoney && values.tokens.money) {
+        template += " · {money}";
+    }
+    return template;
+}
+
+function pushSegment(segments, text, severity) {
+    if (!text) return;
+    var previous = segments[segments.length - 1];
+    if (previous && previous.severity === severity) {
+        previous.text += text;
+    } else {
+        segments.push({ text: text, severity: severity });
+    }
+}
+
+// "{used} · {reset_in}" → [[{ text: "3%", severity }, { text: " · ", … }, …]].
+// Lines are split on a real newline or a literal "\n" typed in the config
+// field. Unknown tokens are kept verbatim; known but unavailable ones show "--".
+function renderTemplate(template, tokens) {
+    var lines = String(template).split(/\\n|\n/).map(function (line) {
+        var segments = [];
+        var last = 0;
+        line.replace(TOKEN_PATTERN, function (match, name, offset) {
+            pushSegment(segments, line.slice(last, offset), Severity.MUTED);
+            if (!tokens.hasOwnProperty(name)) {
+                pushSegment(segments, match, Severity.MUTED);
+            } else if (tokens[name]) {
+                pushSegment(segments, tokens[name].text, tokens[name].severity);
+            } else {
+                pushSegment(segments, "--", Severity.MUTED);
+            }
+            last = offset + match.length;
+            return match;
+        });
+        pushSegment(segments, line.slice(last), Severity.MUTED);
+        return segments;
+    }).filter(function (segments) { return segments.length > 0; });
+
+    return lines.length > 0 ? lines : [[{ text: "--", severity: Severity.MUTED }]];
+}
+
+function lineText(segments) {
+    return segments.map(function (segment) { return segment.text; }).join("");
+}
+
+function mapSegments(lines, mapper) {
+    return lines.map(function (segments) {
+        return segments.map(function (segment) {
+            return { text: segment.text, severity: mapper(segment.severity) };
+        });
+    });
+}
+
+function simpleEntry(icon, label, severity, tooltip) {
+    return {
+        icon: icon,
+        label: label,
+        severity: severity,
+        tooltip: tooltip,
+        lines: [[{ text: label, severity: severity }]]
+    };
+}
+
+function providerPanelEntry(spec, provider, options, thresholds, stale, nowMs) {
+    if (provider.error_code === "login_required" || provider.error_code === "profile_missing") {
+        return simpleEntry(spec.key, "login", Severity.LOGIN_REQUIRED,
+            "AI Usage — " + spec.name + " requiere iniciar sesión (ai-usage-auth " + spec.key + ")");
+    }
+
+    var values = panelValues(provider, spec, options, thresholds, nowMs);
+    if (!provider.ok || !values.hasShort) {
+        return simpleEntry(spec.key, "--", Severity.MUTED,
+            "AI Usage — " + spec.name + " sin datos disponibles");
+    }
+
+    var template = providerTemplate(options, values);
+    if (options.stacked) template = template.split(" · ").join("\n");
+    var lines = renderTemplate(template, values.tokens);
+    if (provider.stale_reason === "oauth_expired") {
+        // Known state, not an error: old data in gray, no "!".
+        lines = mapSegments(lines, function () { return Severity.MUTED; });
+    } else if (stale || provider.stale) {
+        lines = mapSegments(lines, function (severity) {
+            return severity === Severity.NORMAL ? Severity.WARNING : severity;
+        });
+        pushSegment(lines[lines.length - 1], "!", Severity.WARNING);
+    }
+
+    var first = values.tokens.used;
+    return {
+        icon: spec.key,
+        label: lines.map(lineText).join(" / "),
+        severity: first ? first.severity : Severity.MUTED,
+        tooltip: "AI Usage — " + spec.name,
+        lines: lines
+    };
+}
+
+// One panel entry (icon + one or two lines of colored segments) per visible
+// provider. `state` is the object returned by status.js::parseStatusFile.
+function panelEntries(state, rawOptions, nowMs) {
     if (state.kind === "missing") {
-        return [{
-            icon: "ai",
-            label: "--",
-            severity: Severity.MUTED,
-            tooltip: "AI Usage — ejecuta ai-usage-collect"
-        }];
+        return [simpleEntry("ai", "--", Severity.MUTED, "AI Usage — ejecuta ai-usage-collect")];
     }
-
     if (state.kind === "invalid") {
-        return [{
-            icon: "ai",
-            label: "!",
-            severity: Severity.CRITICAL,
-            tooltip: "AI Usage — status.json inválido"
-        }];
+        return [simpleEntry("ai", "!", Severity.CRITICAL, "AI Usage — status.json inválido")];
     }
 
+    var options = panelOptions(rawOptions);
     var status = state.data;
-    var stale = status.stale || isStaleByAge(status);
+    var stale = status.stale || isStaleByAge(status, nowMs);
     var entries = [];
 
-    if (status.codex) {
-        entries.push(providerTopbar("codex", "Codex", "codex",
-            status.codex.ok, status.codex.error_code,
-            preferredMetric(status.codex.five_hour, status.codex.weekly), stale,
-            status.thresholds));
-    }
-
-    if (status.claude) {
-        entries.push(providerTopbar("claude", "Claude", "claude",
-            status.claude.ok, status.claude.error_code,
-            preferredMetric(status.claude.session, status.claude.weekly), stale,
-            status.thresholds));
-    }
+    PROVIDERS.forEach(function (spec) {
+        var provider = status[spec.key];
+        if (!provider) return;
+        if (spec.key === "codex" && !options.showCodex) return;
+        if (spec.key === "claude" && !options.showClaude) return;
+        entries.push(providerPanelEntry(spec, provider, options, status.thresholds, stale, nowMs));
+    });
 
     if (entries.length === 0) {
-        entries.push({
-            icon: "ai",
-            label: "--",
-            severity: Severity.MUTED,
-            tooltip: "AI Usage — sin datos disponibles"
-        });
+        entries.push(simpleEntry("ai", "--", Severity.MUTED, "AI Usage — sin datos disponibles"));
     }
-
     return entries;
 }
 
-// Codex accounts may expose a 5-hour + weekly pair or only a weekly window.
-// Prefer the short window when it contains a percentage, otherwise use weekly.
-function preferredMetric(primary, fallback) {
-    if (primary && primary.used_percent !== null && primary.used_percent !== undefined) {
-        return primary;
-    }
-    return fallback;
+// Text-only preview of the panel for the configuration page, using a fixed
+// sample account so every option has something to show.
+function panelPreview(rawOptions, nowMs) {
+    var nowSeconds = Math.floor(nowMs / 1000);
+    var sample = {
+        kind: "loaded",
+        data: {
+            updated_at: new Date(nowMs).toISOString(),
+            codex: {
+                ok: true,
+                five_hour: { used_percent: 3, remaining_percent: 97, reset_epoch: nowSeconds + 236 * 60 },
+                weekly: { used_percent: 51, remaining_percent: 49, reset_epoch: nowSeconds + 6982 * 60 }
+            },
+            claude: {
+                ok: true,
+                session: { used_percent: 0, remaining_percent: 100, reset_epoch: null, state: "idle" },
+                weekly: { used_percent: 10, remaining_percent: 90, reset_epoch: nowSeconds + 7952 * 60 },
+                billing: { currency: "USD", balance: 4.71, available: 4.71, spent: 0.29, limit: 100, percent: 0.29 }
+            }
+        }
+    };
+    return panelEntries(sample, rawOptions, nowMs).map(function (entry) {
+        var spec = PROVIDERS.filter(function (p) { return p.key === entry.icon; })[0];
+        return (spec ? spec.name + ": " : "") + entry.label;
+    }).join("\n");
 }
 
-function providerTopbar(icon, name, provider, ok, errorCode, metric, stale, thresholds) {
-    if (errorCode === "login_required" || errorCode === "profile_missing") {
-        return {
-            icon: icon,
-            label: "login",
-            severity: Severity.LOGIN_REQUIRED,
-            tooltip: "AI Usage — " + name + " requiere iniciar sesión (ai-usage-auth " + provider + ")"
-        };
-    }
+// --- Tooltip -------------------------------------------------------------
 
-    var usedPercent = metric ? metric.used_percent : null;
-    var hasUsed = usedPercent !== null && usedPercent !== undefined;
-
-    if (!ok || !hasUsed) {
-        return {
-            icon: icon,
-            label: "--",
-            severity: Severity.MUTED,
-            tooltip: "AI Usage — " + name + " sin datos disponibles"
-        };
-    }
-
-    var severity = severityForPercent(usedPercent, thresholds);
-    var label = percent(usedPercent);
-
-    if (stale) {
-        label += "!";
-        if (severity === Severity.NORMAL) severity = Severity.WARNING;
-    }
-
-    var tooltip = "AI Usage — " + name + " " + label + (stale ? " (datos desactualizados)" : " usado");
-
-    return { icon: icon, label: label, severity: severity, tooltip: tooltip };
+function metricLine(label, metric, nowMs) {
+    if (isIdle(metric)) return label + ": sin iniciar";
+    var reset = resetLine(metric, nowMs);
+    return label + ": " + percent(metric.used_percent) + " usado" + (reset ? " · " + reset : "");
 }
+
+function providerTooltip(spec, provider, nowMs) {
+    var lines = [spec.name + (provider.plan_type ? " · " + provider.plan_type : "")];
+    if (!provider.ok) {
+        lines.push("  " + providerErrorMessage(spec.name, provider));
+        return lines.join("\n");
+    }
+
+    if (hasPercent(provider[spec.shortKey])) {
+        lines.push("  " + metricLine(spec.shortLabel, provider[spec.shortKey], nowMs));
+    }
+    if (hasPercent(provider.weekly)) {
+        lines.push("  " + metricLine("Semanal", provider.weekly, nowMs));
+    }
+    var billing = billingOf(provider);
+    if (billing) {
+        lines.push("  Créditos: " + billingAvailableLine(billing));
+        if (hasValue(billing.limit)) lines.push("  " + billingSpentLine(billing));
+    }
+    if (codexHasCredits(provider)) lines.push("  " + codexCreditsLine(provider.credits));
+    if (provider.reset_credits) lines.push("  " + resetCreditsLine(provider.reset_credits));
+    var notice = providerNotice(provider);
+    if (notice) lines.push("  " + notice);
+    return lines.join("\n");
+}
+
+// Full detail on hover, so nothing requires opening the popup.
+function tooltipText(state, nowMs) {
+    if (state.kind !== "loaded") return panelEntries(state, null, nowMs)[0].tooltip;
+
+    var status = state.data;
+    var blocks = [];
+    PROVIDERS.forEach(function (spec) {
+        if (status[spec.key]) blocks.push(providerTooltip(spec, status[spec.key], nowMs));
+    });
+    if (blocks.length === 0) return "AI Usage — sin datos disponibles";
+    if (status.stale || isStaleByAge(status, nowMs)) blocks.push(updatedAtLine(status, nowMs));
+    return blocks.join("\n");
+}
+
+// --- Provider cards --------------------------------------------------------
 
 // Whether a provider has an active session, so the popup can offer "Ir a X"
 // instead of "Iniciar sesión X".
@@ -146,7 +398,57 @@ function isSessionActive(ok, errorCode) {
     return ok || !(errorCode === "login_required" || errorCode === "profile_missing");
 }
 
-function isStaleByAge(status) {
+// "Plan pro · OAuth · hace 1 min".
+function providerSubtitle(provider, nowMs) {
+    if (!provider) return "";
+    var parts = [];
+    if (provider.plan_type) parts.push("Plan " + provider.plan_type);
+    if (SOURCE_LABELS[provider.source]) parts.push(SOURCE_LABELS[provider.source]);
+    var relative = formatRelative(provider.updated_at, nowMs);
+    if (relative) parts.push(relative);
+    return parts.join(" · ");
+}
+
+// Informational (non-error) notice shown under the provider heading.
+function providerNotice(provider) {
+    if (!provider) return "";
+    if (provider.stale_reason === "oauth_expired") {
+        var time = formatLocalTime(provider.updated_at);
+        return "Token de Claude Code expirado: datos de las " + (time || "--")
+            + ". Abre Claude Code para actualizar.";
+    }
+    if (provider.limit_reached === true) {
+        return "Límite de uso alcanzado.";
+    }
+    return "";
+}
+
+function providerErrorMessage(name, provider) {
+    switch (provider ? provider.error_code : null) {
+    case "login_required":
+    case "profile_missing":
+        return "La sesión de " + name + " venció o todavía no está configurada.";
+    case "oauth_expired":
+        return "El token de Claude Code expiró. Abre Claude Code para renovarlo.";
+    default:
+        return name + " no pudo actualizarse. Reintenta o revisa los detalles del aviso.";
+    }
+}
+
+// "Uso semanal: Claude Code 100% · Chats 12%" (only products with usage).
+function breakdownLine(rows) {
+    if (!rows || !rows.length) return "";
+    var used = rows.filter(function (row) { return row.percent > 0; });
+    if (used.length === 0) return "";
+    return "Uso semanal: " + used.map(function (row) {
+        return row.name + " " + percent(row.percent);
+    }).join(" · ");
+}
+
+// --- Dates and durations ---------------------------------------------------
+
+function isStaleByAge(status, nowMs) {
+    var now = hasValue(nowMs) ? nowMs : Date.now();
     var updatedAt = Date.parse(status.updated_at);
     if (isNaN(updatedAt)) return false;
 
@@ -156,59 +458,109 @@ function isStaleByAge(status) {
         if (!isNaN(clearedAt) && clearedAt > updatedAt) reference = clearedAt;
     }
 
-    var ageMs = Date.now() - reference;
+    var ageMs = now - reference;
     var staleMinutes = status.thresholds && status.thresholds.stale_after_minutes !== undefined
         ? status.thresholds.stale_after_minutes : 15;
     return ageMs > staleMinutes * 60 * 1000;
 }
 
 // "Actualizado 14:07 (hace 2 min)" / stale variant for the popup header.
-function updatedAtLine(status) {
-    var relative = formatRelative(status.updated_at) || "fecha desconocida";
-    var localTime = formatLocalTime(status.updated_at) || "hora desconocida";
+function updatedAtLine(status, nowMs) {
+    var relative = formatRelative(status.updated_at, nowMs) || "fecha desconocida";
+    var localTime = formatLocalTime(status.updated_at, nowMs) || "hora desconocida";
     var timestamp = localTime + " (" + relative + ")";
 
-    if (status.stale || isStaleByAge(status)) {
+    if (status.stale || isStaleByAge(status, nowMs)) {
         return "Datos desactualizados · última info " + timestamp;
     }
     return "Actualizado " + timestamp;
 }
 
-function formatRelative(updatedAt) {
+function formatRelative(updatedAt, nowMs) {
     var parsed = Date.parse(updatedAt);
     if (isNaN(parsed)) return null;
 
-    var minutes = Math.floor((Date.now() - parsed) / 60000);
+    var now = hasValue(nowMs) ? nowMs : Date.now();
+    var minutes = Math.floor((now - parsed) / 60000);
     if (minutes <= 0) return "hace instantes";
     if (minutes === 1) return "hace 1 min";
     if (minutes < 60) return "hace " + minutes + " min";
 
     var hours = Math.floor(minutes / 60);
-    return hours === 1 ? "hace 1 h" : ("hace " + hours + " h");
+    if (hours < 24) return hours === 1 ? "hace 1 h" : ("hace " + hours + " h");
+    var days = Math.floor(hours / 24);
+    return days === 1 ? "hace 1 d" : ("hace " + days + " d");
 }
 
-function formatLocalTime(updatedAt) {
+function pad2(n) {
+    return n < 10 ? "0" + n : "" + n;
+}
+
+function formatLocalTime(updatedAt, nowMs) {
     var parsed = Date.parse(updatedAt);
     if (isNaN(parsed)) return null;
 
     var date = new Date(parsed);
-    var now = new Date();
-    var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+    var now = new Date(hasValue(nowMs) ? nowMs : Date.now());
     var sameDay = date.getFullYear() === now.getFullYear() &&
         date.getMonth() === now.getMonth() &&
         date.getDate() === now.getDate();
 
     if (sameDay) {
-        return pad(date.getHours()) + ":" + pad(date.getMinutes());
+        return pad2(date.getHours()) + ":" + pad2(date.getMinutes());
     }
-    return pad(date.getDate()) + "/" + pad(date.getMonth() + 1) + " " +
-        pad(date.getHours()) + ":" + pad(date.getMinutes());
+    return pad2(date.getDate()) + "/" + pad2(date.getMonth() + 1) + " " +
+        pad2(date.getHours()) + ":" + pad2(date.getMinutes());
+}
+
+// "17:24".
+function clockLabel(epochSeconds) {
+    if (!hasValue(epochSeconds)) return null;
+    var date = new Date(epochSeconds * 1000);
+    return pad2(date.getHours()) + ":" + pad2(date.getMinutes());
+}
+
+// "mié 09:50".
+function weekdayClockLabel(epochSeconds) {
+    if (!hasValue(epochSeconds)) return null;
+    return WEEKDAYS[new Date(epochSeconds * 1000).getDay()] + " " + clockLabel(epochSeconds);
+}
+
+// "hoy 17:24" / "mañana 01:00" / "mié 14 09:50" / "22/10 15:13".
+function dayClockLabel(epochSeconds, nowMs) {
+    var date = new Date(epochSeconds * 1000);
+    var now = new Date(hasValue(nowMs) ? nowMs : Date.now());
+    var startOfDay = function (d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+    var days = Math.round((startOfDay(date) - startOfDay(now)) / 86400000);
+    var clock = clockLabel(epochSeconds);
+
+    if (days === 0) return "hoy " + clock;
+    if (days === 1) return "mañana " + clock;
+    if (days > 1 && days < 7) return WEEKDAYS[date.getDay()] + " " + date.getDate() + " " + clock;
+    return pad2(date.getDate()) + "/" + pad2(date.getMonth() + 1) + " " + clock;
+}
+
+// "22/10".
+function dayMonthLabel(epochSeconds) {
+    var date = new Date(epochSeconds * 1000);
+    return pad2(date.getDate()) + "/" + pad2(date.getMonth() + 1);
 }
 
 // `26%` / `--` for a raw percentage.
 function percent(value) {
     if (value === null || value === undefined) return "--";
     return Math.round(value) + "%";
+}
+
+// Like percent() but keeps one decimal for small non-integer values, so a
+// USD 0.29 spend over USD 100 reads 0.3% instead of 0%.
+function percentPrecise(value) {
+    if (value === null || value === undefined) return "--";
+    var number = Number(value);
+    if (number > 0 && number < 10 && Math.round(number) !== number) {
+        return number.toFixed(1) + "%";
+    }
+    return Math.round(number) + "%";
 }
 
 var UNIT_MINUTES = {
@@ -243,9 +595,11 @@ function remainingMinutes(label) {
 
 // Minutes remaining until a metric's reset. Prefers reset_epoch (live
 // countdown) over parsing the duration out of reset_label.
-function metricRemainingMinutes(metric) {
-    if (metric.reset_epoch !== null && metric.reset_epoch !== undefined) {
-        var mins = Math.floor((metric.reset_epoch - Math.floor(Date.now() / 1000)) / 60);
+function metricRemainingMinutes(metric, nowMs) {
+    if (!metric) return null;
+    if (hasValue(metric.reset_epoch)) {
+        var now = hasValue(nowMs) ? nowMs : Date.now();
+        var mins = Math.floor((metric.reset_epoch * 1000 - now) / 60000);
         return mins >= 0 ? mins : null;
     }
     if (metric.reset_label) {
@@ -265,41 +619,40 @@ function durationBreakdown(totalMinutes) {
     return hours + " h " + minutes + " min";
 }
 
-// Reset label with a days/hours/minutes breakdown.
-function resetLabelWithDuration(metric) {
-    var label = resetLabel(metric);
-    if (metric) {
-        var mins = metricRemainingMinutes(metric);
-        if (mins !== null) {
-            return "reinicia " + label + " (" + durationBreakdown(mins) + ")";
-        }
-    }
-    return "reinicia " + label;
+// Panel-sized duration: "45m", "3h56", "4d20h".
+function compactDuration(totalMinutes) {
+    if (!hasValue(totalMinutes)) return null;
+    if (totalMinutes < 60) return totalMinutes + "m";
+    if (totalMinutes < 1440) return Math.floor(totalMinutes / 60) + "h" + pad2(totalMinutes % 60);
+    return Math.floor(totalMinutes / 1440) + "d" + Math.floor((totalMinutes % 1440) / 60) + "h";
 }
 
-function resetLabel(metric) {
-    if (metric && metric.reset_label) return metric.reset_label;
-    return "--";
+// "reinicia hoy 17:24 (3 h 56 min)"; "" when the metric has no reset info.
+function resetLine(metric, nowMs) {
+    if (!metric) return "";
+    if (isIdle(metric)) return "Empieza con tu primer mensaje.";
+
+    var mins = metricRemainingMinutes(metric, nowMs);
+    var suffix = mins !== null ? " (" + durationBreakdown(mins) + ")" : "";
+    if (hasValue(metric.reset_epoch)) {
+        return "reinicia " + dayClockLabel(metric.reset_epoch, nowMs) + suffix;
+    }
+    if (metric.reset_label) {
+        return "reinicia " + metric.reset_label + suffix;
+    }
+    return "";
 }
 
 // Severity of a metric's used_percent, for coloring popup values.
 function metricSeverity(metric, thresholds) {
-    if (metric && metric.used_percent !== null && metric.used_percent !== undefined) {
-        return severityForPercent(metric.used_percent, thresholds);
-    }
-    return Severity.MUTED;
+    return windowSeverity(metric, thresholds);
 }
 
-// `100% usado · 0% restante`.
+// `100% usado · 0% restante` / `sin iniciar`.
 function usageSummary(metric) {
+    if (isIdle(metric)) return "sin iniciar · 100% disponible";
     var used = metric ? metric.used_percent : null;
-    var remaining = metric ? metric.remaining_percent : null;
-    return percent(used) + " usado · " + percent(remaining) + " restante";
-}
-
-// Remaining Codex credits, e.g. `128` or `--`.
-function credits(value) {
-    return (value === null || value === undefined) ? "--" : String(value);
+    return percent(used) + " usado · " + percent(remainingPercent(metric)) + " restante";
 }
 
 // `0 / 5` for Claude's included daily routine runs.
@@ -311,34 +664,134 @@ function routines(routinesObj) {
     return "--";
 }
 
-// `USD 3.24` / `--` for a dollar amount.
-function usd(value) {
-    if (value === null || value === undefined) return "--";
-    return "USD " + value.toFixed(2);
+// --- Credits ---------------------------------------------------------------
+
+// Normalized money block (see billingSummary() in the collector): `balance`
+// is the prepaid credit, `limit` only the monthly spending cap, `available`
+// the balance capped by what is left of that limit. Snapshots from schema v1
+// only have the legacy `credits` object (spent_usd/limit_usd/…), so derive
+// the same shape.
+function billingOf(provider) {
+    if (!provider) return null;
+    if (provider.billing) return provider.billing;
+
+    var legacy = provider.credits;
+    if (!legacy || (!hasValue(legacy.spent_usd) && !hasValue(legacy.limit_usd) && !hasValue(legacy.balance_usd))) {
+        return null;
+    }
+    var spent = hasValue(legacy.spent_usd) ? legacy.spent_usd : null;
+    var limit = hasValue(legacy.limit_usd) ? legacy.limit_usd : null;
+    var balance = hasValue(legacy.balance_usd) ? legacy.balance_usd : null;
+    var limitRemaining = limit !== null && spent !== null
+        ? Math.round(Math.max(0, limit - spent) * 100) / 100 : null;
+    return {
+        currency: "USD",
+        balance: balance,
+        available: balance === null ? null
+            : limitRemaining === null ? balance : Math.min(balance, limitRemaining),
+        spent: spent,
+        limit: limit,
+        limit_remaining: limitRemaining,
+        percent: hasValue(legacy.spent_percent) ? legacy.spent_percent : null,
+        limit_reached: false
+    };
 }
 
-// `USD 3.24 gastado · 16% usado`.
-function creditsSpent(creditsObj) {
-    var spent = usd(creditsObj.spent_usd);
-    if (creditsObj.spent_percent !== null && creditsObj.spent_percent !== undefined) {
-        return spent + " gastado · " + Math.round(creditsObj.spent_percent) + "% usado";
-    }
-    return spent + " gastado";
+// `USD 3.24` / `--`.
+function money(amount, currency) {
+    if (!hasValue(amount)) return "--";
+    return (currency || "USD") + " " + Number(amount).toFixed(2);
 }
 
-// `USD 9.51 saldo · USD 20 límite`.
-function creditsBalance(creditsObj) {
-    if (creditsObj.balance_usd === null || creditsObj.balance_usd === undefined) {
-        return usd(creditsObj.limit_usd) + " límite mensual";
-    }
-    return usd(creditsObj.balance_usd) + " saldo · " + usd(creditsObj.limit_usd) + " límite";
+// `$99.71` for the panel.
+function shortMoney(amount, currency) {
+    if (!hasValue(amount)) return null;
+    if (!currency || currency === "USD") return "$" + Number(amount).toFixed(2);
+    return Number(amount).toFixed(2) + " " + currency;
 }
 
-function creditsSeverity(creditsObj, thresholds) {
-    if (creditsObj.spent_percent !== null && creditsObj.spent_percent !== undefined) {
-        return severityForPercent(creditsObj.spent_percent, thresholds);
+// `USD 4.71 disponibles`; when the monthly limit leaves less than the
+// balance, `USD 2.00 disponibles (saldo USD 4.71)`. The spending limit is
+// never presented as money.
+function billingAvailableLine(billing) {
+    if (!hasValue(billing.available)) return "saldo no informado";
+    var line = money(billing.available, billing.currency) + " disponibles";
+    if (hasValue(billing.balance) && billing.balance !== billing.available) {
+        line += " (saldo " + money(billing.balance, billing.currency) + ")";
     }
+    return line;
+}
+
+// `Límite de gasto mensual: USD 0.29 de USD 100.00 (0.3%)`.
+function billingSpentLine(billing) {
+    if (!hasValue(billing.limit)) {
+        return money(billing.spent, billing.currency) + " gastado este mes";
+    }
+    var line = "Límite de gasto mensual: " + money(billing.spent, billing.currency)
+        + " de " + money(billing.limit, billing.currency);
+    if (hasValue(billing.percent)) line += " (" + percentPrecise(billing.percent) + ")";
+    return line;
+}
+
+// Color of the available amount: nothing left (or limit reached) is critical.
+function availableSeverity(billing) {
+    if (!billing || !hasValue(billing.available)) return Severity.MUTED;
+    if (billing.limit_reached === true || billing.available <= 0) return Severity.CRITICAL;
+    return Severity.NORMAL;
+}
+
+// Color of the monthly spending-limit bar.
+function billingSeverity(billing, thresholds) {
+    if (!billing) return Severity.MUTED;
+    if (billing.limit_reached === true) return Severity.CRITICAL;
+    if (hasValue(billing.percent)) return severityForPercent(billing.percent, thresholds);
     return Severity.MUTED;
+}
+
+function codexHasCredits(provider) {
+    var credits = provider ? provider.credits : null;
+    return !!credits && hasValue(credits.has_credits) && (credits.has_credits || credits.unlimited);
+}
+
+function creditUnits(value) {
+    return String(Math.round(Number(value || 0) * 100) / 100);
+}
+
+// `12.5 créditos` / `Créditos ilimitados` for Codex (units, not money).
+function codexCreditsLine(credits) {
+    if (!credits) return "--";
+    if (credits.unlimited) return "Créditos ilimitados";
+    return creditUnits(credits.balance) + " créditos";
+}
+
+// `3 reinicios gratis de límites · el primero vence el 22/10`.
+function resetCreditsLine(resetCredits) {
+    var count = resetCredits.available;
+    var line = count + (count === 1 ? " reinicio gratis" : " reinicios gratis") + " de límites";
+    if (hasValue(resetCredits.next_expiry_epoch)) {
+        line += " · " + (count === 1 ? "vence" : "el primero vence") + " el "
+            + dayMonthLabel(resetCredits.next_expiry_epoch);
+    }
+    return line;
+}
+
+// Money/credits token for the panel, or null when there is nothing to show.
+function panelMoney(provider, thresholds) {
+    var billing = billingOf(provider);
+    if (billing && hasValue(billing.available)) {
+        return {
+            text: shortMoney(billing.available, billing.currency),
+            severity: availableSeverity(billing)
+        };
+    }
+    if (codexHasCredits(provider)) {
+        var credits = provider.credits;
+        return {
+            text: credits.unlimited ? "∞ cr" : creditUnits(credits.balance) + " cr",
+            severity: Severity.NORMAL
+        };
+    }
+    return null;
 }
 
 // Human-readable hint shown under an error entry.
@@ -347,12 +800,16 @@ function errorHint(error) {
     case "login_required":
     case "profile_missing":
         return "Ejecuta: ai-usage-auth " + error.provider;
+    case "oauth_expired":
+        return "Abre Claude Code: renueva el token automáticamente.";
     case "page_changed":
-        return "El layout pudo haber cambiado. Revisa el collector con debug_text activado.";
+        return "El layout pudo haber cambiado. Revisa ~/.cache/ai-usage-status/debug-<proveedor>-text.txt.";
     case "network_error":
         return "Sin conexión o la página no respondió a tiempo.";
     case "profile_busy":
         return "Ya hay una sesión de Chrome en uso para este proveedor. Esperá a que termine.";
+    case "browser_crashed":
+        return "Chrome se cerró al iniciar. El colector probará automáticamente el modo compatible.";
     default:
         return "Revisa el collector con: ai-usage-collect";
     }

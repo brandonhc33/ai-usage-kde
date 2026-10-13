@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                          http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+
+  <group name="General">
+    <!-- used | remaining | time | used_time | remaining_time | custom -->
+    <entry name="panelPreset" type="String">
+      <default>used</default>
+    </entry>
+    <!-- Only for panelPreset=custom; tokens documented in format.js. -->
+    <entry name="panelTemplate" type="String">
+      <default>{used} · {reset_in}</default>
+    </entry>
+    <entry name="showWeekly" type="Bool">
+      <default>false</default>
+    </entry>
+    <entry name="showWeeklyReset" type="Bool">
+      <default>false</default>
+    </entry>
+    <entry name="twoLines" type="Bool">
+      <default>false</default>
+    </entry>
+    <entry name="showMoney" type="Bool">
+      <default>false</default>
+    </entry>
+    <!-- dim | weekly -->
+    <entry name="idleWindow" type="String">
+      <default>dim</default>
+    </entry>
+    <entry name="showCodex" type="Bool">
+      <default>true</default>
+    </entry>
+    <entry name="showClaude" type="Bool">
+      <default>true</default>
+    </entry>
+    <!-- 0 disables the widget's own timer (systemd timer only). -->
+    <entry name="refreshMinutes" type="Int">
+      <default>2</default>
+      <min>0</min>
+      <max>60</max>
+    </entry>
+  </group>
+</kcfg>
