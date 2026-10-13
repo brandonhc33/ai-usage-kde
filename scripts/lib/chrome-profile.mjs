@@ -28,6 +28,28 @@ export async function resolveBrowserLaunchOptions() {
   );
 }
 
+/**
+ * Returns a stable-enough key for remembering launch compatibility. Package
+ * upgrades replace the browser launcher, changing its size or mtime and
+ * automatically causing the headed/Xvfb path to be tried again.
+ */
+export async function browserExecutableFingerprint(executablePath) {
+  const stats = await fs.stat(executablePath);
+  return `${executablePath}:${stats.size}:${Math.trunc(stats.mtimeMs)}`;
+}
+
+/**
+ * Playwright reports an early browser process crash as a closed target. Keep
+ * this deliberately narrower than all launch errors: a missing display or a
+ * bad configuration should still be surfaced instead of being remembered as
+ * a browser incompatibility.
+ */
+export function isBrowserProcessCrash(error) {
+  const message = String(error?.message ?? error);
+  return /launchPersistentContext/i.test(message)
+    && /signal=SIG(?:SEGV|ILL|BUS|ABRT)/i.test(message);
+}
+
 function isProcessAlive(pid) {
   try {
     process.kill(pid, 0);

@@ -3,14 +3,22 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  browserExecutableFingerprint,
   clearStaleSingletonLock,
+  isBrowserProcessCrash,
   resolveBrowserLaunchOptions,
 } from './lib/chrome-profile.mjs';
+import {
+  recordFailure,
+  recordSuccess,
+  webBackoffUntil,
+} from './lib/provider-state.mjs';
 import { fetchClaudeOAuth, fetchCodexCli } from './lib/structured-sources.mjs';
 import { withDisplay } from './lib/xvfb.mjs';
 import {
   CLAUDE_READY,
   CODEX_READY,
+  claudeBillingFromCredits,
   parseClaude,
   parseCodex,
 } from './lib/web-parsers.mjs';
@@ -23,8 +31,28 @@ const OUT_FILE = path.join(CACHE_DIR, 'status.json');
 const LAST_GOOD_FILE = path.join(CACHE_DIR, 'last-good-status.json');
 const LOCK_FILE = path.join(CACHE_DIR, 'collector.lock');
 const ERROR_LOG_FILE = path.join(CACHE_DIR, 'errors.log');
+const BROWSER_DISPLAY_MODE_FILE = path.join(CACHE_DIR, 'browser-display-mode.json');
+const PROVIDER_STATE_FILE = path.join(CACHE_DIR, 'provider-state.json');
 const LOCK_STALE_MS = 10 * 60 * 1000;
 const GENERIC_FETCH_ERROR = 'No se obtuvo la información.';
+const SCHEMA_VERSION = 2;
+const WINDOW_KEYS = ['five_hour', 'weekly', 'session', 'routines'];
+
+// --force: manual refresh, ignores the web-fallback backoff.
+// --if-older-than <s>: periodic refresh from the widget; does nothing when
+// status.json was written less than <s> seconds ago (e.g. by the systemd
+// timer), so two schedulers do not double the work.
+const ARGS = process.argv.slice(2);
+const FORCE = ARGS.includes('--force');
+const IF_OLDER_THAN_SECONDS = (() => {
+  const index = ARGS.indexOf('--if-older-than');
+  if (index === -1) return null;
+  const seconds = Number(ARGS[index + 1]);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+})();
+
+// Loaded in main(); see lib/provider-state.mjs.
+let providerState = {};
 
 const DEFAULT_CONFIG = {
   schema_version: 1,
@@ -52,6 +80,9 @@ const DEFAULT_CONFIG = {
       source: 'auto',
       oauth_credentials_file: '~/.claude/.credentials.json',
       oauth_timeout_ms: 30000,
+      // keep_last: an expired Claude Code token keeps the last snapshot
+      // (marked stale) instead of launching Chrome. web: old behavior.
+      on_oauth_expired: 'keep_last',
       url: 'https://claude.ai/new#settings/usage',
       profile_dir: '~/.config/ai-usage-status/profiles/claude',
       headless: true,
@@ -102,6 +133,7 @@ async function ensureDefaultConfig() {
 function classifyError(error) {
   if (error?.code) return error.code;
   const message = String(error?.message ?? error);
+  if (isBrowserProcessCrash(error)) return 'browser_crashed';
   if (/timeout|timed out|net::|ERR_/i.test(message)) return 'network_error';
   return 'collector_error';
 }
@@ -125,6 +157,23 @@ async function appendErrorLog(provider, error, extra = {}) {
     await fs.appendFile(ERROR_LOG_FILE, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
   } catch (logError) {
     console.error(`No pude escribir ${ERROR_LOG_FILE}:`, logError);
+  }
+}
+
+// Logs only the first failure of an incident; repeated runs with the same
+// code just bump the counter in provider-state.json.
+async function reportFailure(provider, error, extra = {}) {
+  const { state, shouldLog, entry } = recordFailure(
+    providerState,
+    provider,
+    classifyError(error),
+    extra.phase ?? null,
+  );
+  providerState = state;
+  if (shouldLog) {
+    await appendErrorLog(provider, error, extra);
+  } else {
+    console.warn(`${provider}: ${entry.code} se repite (${entry.count} veces desde ${entry.first_at}).`);
   }
 }
 
@@ -207,17 +256,29 @@ async function waitForUsageText(page, readyPattern, maxMs) {
   }
 }
 
-async function scrapeProvider(name, providerConfig, parser, readyPattern) {
+const LOGIN_URL = /\/(login|log-in|signin|sign-in|auth)\b/i;
+const LOGIN_TEXT = /iniciar sesión|log in|sign in|sign up/i;
+
+async function writeDebugText(name, text) {
+  await fs.writeFile(path.join(CACHE_DIR, `debug-${name}-text.txt`), text, { mode: 0o600 });
+}
+
+async function scrapeProvider(name, providerConfig, parser, readyPattern, fallbackFrom = null) {
   const profileDir = expandHome(providerConfig.profile_dir);
   try {
     // Playwright es una dependencia pesada y solo se carga si una fuente
     // estructurada no está disponible.
     const { chromium } = await import('playwright');
     await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
-    await clearStaleSingletonLock(profileDir);
     const browserLaunchOptions = await resolveBrowserLaunchOptions();
+    const compatibilityKey = await browserExecutableFingerprint(
+      browserLaunchOptions.executablePath,
+    );
 
-    const text = await withDisplay(async (display) => {
+    return await withDisplay(async (display) => {
+      // A failed Chrome launch can leave Singleton* files behind. This must
+      // run for both the first attempt and an automatic headless retry.
+      await clearStaleSingletonLock(profileDir);
       const context = await chromium.launchPersistentContext(profileDir, {
         // Mismo motivo que en ai-usage-auth.mjs: el Chrome real evita los
         // desafíos "Verify you are human" de Cloudflare que bloquean al
@@ -232,23 +293,49 @@ async function scrapeProvider(name, providerConfig, parser, readyPattern) {
       try {
         const page = await context.newPage();
         await page.goto(providerConfig.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-        return await waitForUsageText(page, readyPattern, providerConfig.wait_ms ?? 8000);
+        const text = await waitForUsageText(page, readyPattern, providerConfig.wait_ms ?? 8000);
+
+        // A page that already shows usage is logged in, even if a footer or
+        // upsell button says "Sign up". Otherwise trust the URL first.
+        if (!readyPattern.test(text) && (LOGIN_URL.test(page.url()) || LOGIN_TEXT.test(text))) {
+          throw Object.assign(
+            new Error(`${name} requiere iniciar sesión.`),
+            { code: 'login_required' },
+          );
+        }
+
+        if (providerConfig.debug_text) {
+          await writeDebugText(name, text);
+        }
+
+        try {
+          return parser(text);
+        } catch (error) {
+          // Keep the text of the last unparsable page (0600; may include the
+          // account name) so a parser fixture can be written from it.
+          if (error?.code === 'page_changed' && !providerConfig.debug_text) {
+            await writeDebugText(name, text).catch(() => {});
+          }
+          throw error;
+        }
       } finally {
-        await context.close();
+        await context.close().catch(() => {});
       }
+    }, {
+      compatibilityKey,
+      recoveryFile: BROWSER_DISPLAY_MODE_FILE,
+      shouldRetryHeadless: isBrowserProcessCrash,
+      onHeadlessRecovery: () => {
+        console.warn(
+          `${name}: Chrome falló sobre Xvfb; reintentando en modo headless compatible.`,
+        );
+      },
     });
-
-    if (/iniciar sesión|log in|sign in|sign up/i.test(text)) {
-      throw Object.assign(new Error(`${name} requiere iniciar sesión.`), { code: 'login_required' });
-    }
-
-    if (providerConfig.debug_text) {
-      await fs.writeFile(path.join(CACHE_DIR, `debug-${name}-text.txt`), text);
-    }
-
-    return parser(text);
   } catch (error) {
-    await appendErrorLog(name, error, { phase: 'scrape' });
+    await reportFailure(name, error, {
+      phase: 'scrape',
+      ...(fallbackFrom ? { fallback_from: fallbackFrom } : {}),
+    });
     return providerFailure('web', error);
   }
 }
@@ -281,25 +368,50 @@ async function collectProvider(
       new Error(`Fuente '${source}' no válida para ${name}.`),
       { code: 'config_error' },
     );
-    await appendErrorLog(name, error, { phase: 'config' });
+    await reportFailure(name, error, { phase: 'config' });
     return providerFailure(source, error);
   }
 
+  let fallbackFrom = null;
   if (source === 'auto' || source === structuredSource) {
     try {
       return await structuredFetcher(providerConfig);
     } catch (error) {
+      // Claude Code only renews its token while it is being used. Until the
+      // first use of the day the token is expired; scraping claude.ai then
+      // fails every two minutes, so keep the last snapshot instead.
+      if (classifyError(error) === 'oauth_expired' && providerConfig.on_oauth_expired !== 'web') {
+        await reportFailure(name, error, { phase: structuredSource });
+        return { ...providerFailure(structuredSource, error), keep_last: true };
+      }
       if (source === structuredSource) {
-        await appendErrorLog(name, error, { phase: structuredSource });
+        await reportFailure(name, error, { phase: structuredSource });
         return providerFailure(structuredSource, error);
       }
+      fallbackFrom = {
+        source: structuredSource,
+        code: classifyError(error),
+        message: String(error?.message ?? error),
+      };
       console.warn(
-        `${name}: ${structuredSource} no disponible (${classifyError(error)}); usando fallback web.`,
+        `${name}: ${structuredSource} no disponible (${fallbackFrom.code}); usando fallback web.`,
       );
     }
   }
 
-  return scrapeProvider(name, providerConfig, parser, readyPattern);
+  const backoffUntil = webBackoffUntil(providerState[name]);
+  if (!FORCE && Date.now() < backoffUntil) {
+    console.warn(
+      `${name}: fallback web en pausa hasta ${new Date(backoffUntil).toISOString()} `
+      + `tras ${providerState[name].count} fallos (${providerState[name].code}).`,
+    );
+    return {
+      ...providerFailure('web', { code: providerState[name].code }),
+      backoff_until: new Date(backoffUntil).toISOString(),
+    };
+  }
+
+  return scrapeProvider(name, providerConfig, parser, readyPattern, fallbackFrom);
 }
 
 function buildPrimary(config, status) {
@@ -365,6 +477,8 @@ function providerHasUsableData(provider) {
   if (provider?.ok !== true) return false;
 
   return (
+    hasObtainedValue(provider.billing?.spent) ||
+    hasObtainedValue(provider.billing?.balance) ||
     metricHasUsableData(provider.five_hour) ||
     metricHasUsableData(provider.weekly) ||
     metricHasUsableData(provider.session) ||
@@ -438,17 +552,20 @@ function mergeProviderFields(providerName, provider, previousProvider) {
       five_hour: mergeMetric(provider.five_hour, previousProvider.five_hour),
       weekly: mergeMetric(provider.weekly, previousProvider.weekly),
       credits_remaining: valueOrPrevious(provider.credits_remaining, previousProvider.credits_remaining),
+      credits: provider.credits ?? previousProvider.credits ?? null,
     };
   }
 
   if (providerName === 'claude') {
+    const credits = mergeCredits(provider.credits, previousProvider.credits);
     return {
       ...provider,
       session: mergeMetric(provider.session, previousProvider.session),
       weekly: mergeMetric(provider.weekly, previousProvider.weekly),
       routines: mergeMetric(provider.routines, previousProvider.routines),
       daily_routines: mergeRoutines(provider.daily_routines, previousProvider.daily_routines),
-      credits: mergeCredits(provider.credits, previousProvider.credits),
+      credits,
+      billing: claudeBillingFromCredits(credits),
     };
   }
 
@@ -482,8 +599,40 @@ function providerWithinFallbackWindow(provider, validMinutes) {
   return Date.now() - updatedAt <= minutes * 60 * 1000;
 }
 
+// A reused snapshot may outlive its windows (e.g. kept overnight while the
+// Claude token was expired). A window whose reset already passed has, at
+// most, the usage made since; show it as not started instead of the old %.
+function expireElapsedWindows(provider, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const next = { ...provider };
+  for (const key of WINDOW_KEYS) {
+    const metric = provider[key];
+    if (hasObtainedValue(metric?.reset_epoch) && metric.reset_epoch <= nowSeconds) {
+      next[key] = {
+        ...metric,
+        used_percent: 0,
+        remaining_percent: 100,
+        reset_label: null,
+        reset_epoch: null,
+        state: 'idle',
+      };
+    }
+  }
+  return next;
+}
+
 function mergeProviderResult(providerName, provider, previousStatus, failures, validMinutes) {
   const candidate = previousStatus?.[providerName];
+
+  // Known, non-error state: keep the last data regardless of its age and let
+  // the widget present it as "datos de las HH:MM".
+  if (!provider.ok && provider.keep_last && providerHasUsableData(candidate)) {
+    return {
+      ...expireElapsedWindows(candidate),
+      stale: true,
+      stale_reason: provider.error_code,
+    };
+  }
+
   const previousProvider = providerWithinFallbackWindow(candidate, validMinutes)
     ? candidate
     : null;
@@ -498,10 +647,12 @@ function mergeProviderResult(providerName, provider, previousStatus, failures, v
   }));
 
   if (previousProvider) {
-    return previousProvider;
+    return expireElapsedWindows(previousProvider);
   }
 
-  return provider;
+  // `keep_last` only steers this merge; it is not part of status.json.
+  const { keep_last: _keepLast, ...failure } = provider;
+  return failure;
 }
 
 function lastGoodSnapshot(config, status) {
@@ -548,7 +699,7 @@ function failureStatusFromPrevious(previousStatus, error, config = DEFAULT_CONFI
   }
 
   return {
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     updated_at: now,
     ok: false,
     stale: true,
@@ -564,9 +715,22 @@ async function writeAtomic(file, data) {
   await fs.rename(tmp, file);
 }
 
+async function statusIsFresh(maxAgeSeconds) {
+  const stats = await fs.stat(OUT_FILE).catch(() => null);
+  return Boolean(stats) && Date.now() - stats.mtimeMs < maxAgeSeconds * 1000;
+}
+
+function recordProviderOutcome(name, provider) {
+  if (provider.ok) providerState = recordSuccess(providerState, name);
+}
+
 async function main() {
   await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
   await ensureDefaultConfig();
+  if (!FORCE && IF_OLDER_THAN_SECONDS !== null && await statusIsFresh(IF_OLDER_THAN_SECONDS)) {
+    console.log('ai-usage-collect: status.json es reciente; no hay nada que hacer.');
+    return;
+  }
   const releaseLock = await acquireCollectorLock();
   if (!releaseLock) return;
 
@@ -574,10 +738,11 @@ async function main() {
     const config = normalizeConfig(await readJson(CONFIG_FILE, null));
     const previousStatus =
       (await readJson(LAST_GOOD_FILE, null)) ?? (await readJson(OUT_FILE, null));
+    providerState = (await readJson(PROVIDER_STATE_FILE, null)) ?? {};
     const failures = [];
 
     const result = {
-      schema_version: 1,
+      schema_version: SCHEMA_VERSION,
       updated_at: new Date().toISOString(),
       ok: true,
       stale: false,
@@ -595,6 +760,7 @@ async function main() {
         parseCodex,
         CODEX_READY,
       );
+      recordProviderOutcome('codex', codex);
       result.codex = mergeProviderResult(
         'codex',
         codex,
@@ -613,6 +779,7 @@ async function main() {
         parseClaude,
         CLAUDE_READY,
       );
+      recordProviderOutcome('claude', claude);
       result.claude = mergeProviderResult(
         'claude',
         claude,
@@ -629,6 +796,7 @@ async function main() {
     result.primary = buildPrimary(config, result);
 
     await writeAtomic(OUT_FILE, result);
+    await writeAtomic(PROVIDER_STATE_FILE, providerState);
 
     if (hasAnyProviderData(result)) {
       await writeAtomic(LAST_GOOD_FILE, lastGoodSnapshot(config, result));

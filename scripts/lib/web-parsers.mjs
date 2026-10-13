@@ -7,6 +7,8 @@
  * text order.
  */
 
+import { billingSummary } from './structured-sources.mjs';
+
 export const CODEX_READY =
   /(Límite de uso de 5 horas|5[\s-]?hour usage limit|Límite de uso semanal|Weekly usage limit)[\s\S]*?\d+(?:[.,]\d+)?\s*%\s*(restante|remaining|usado|used)/i;
 
@@ -110,6 +112,7 @@ function usageMetric(sectionText, mode) {
     reset_label: resetLabel,
     reset_epoch: resetEpochSeconds(resetLabel),
     display_mode: mode,
+    state: usedPercent === 0 && !resetLabel ? 'idle' : 'active',
   };
 }
 
@@ -133,14 +136,32 @@ export function parseCodex(raw) {
     throw Object.assign(new Error('No pude parsear Codex usage.'), { code: 'page_changed' });
   }
 
+  const creditsRemaining = credits ? number(credits[1]) : null;
+
   return {
     ok: true,
     source: 'web',
     updated_at: new Date().toISOString(),
     five_hour: fiveHour,
     weekly,
-    credits_remaining: credits ? number(credits[1]) : null,
+    credits_remaining: creditsRemaining,
+    credits: creditsRemaining === null
+      ? null
+      : { balance: creditsRemaining, has_credits: creditsRemaining > 0, unlimited: false },
   };
+}
+
+// Normalized `billing` block from the legacy Claude `credits` object, so the
+// web fallback and merged snapshots expose the same shape as OAuth.
+export function claudeBillingFromCredits(credits) {
+  if (!credits) return null;
+  return billingSummary({
+    currency: 'USD',
+    spent: credits.spent_usd ?? null,
+    limit: credits.limit_usd ?? null,
+    balance: credits.balance_usd ?? null,
+    percent: credits.spent_percent ?? null,
+  });
 }
 
 function parseClaudeCredits(text) {
@@ -158,13 +179,20 @@ function parseClaudeCredits(text) {
   );
   const balance =
     text.match(/USD\s*([\d.,]+)(?:(?!USD)[\s\S]){0,50}?(?:Saldo actual|Current balance)/i)
-    || text.match(/(?:Saldo actual|Current balance)(?:(?!USD)[\s\S]){0,70}?USD\s*([\d.,]+)/i);
+    || text.match(/(?:Saldo actual|Current balance)(?:(?!USD)[\s\S]){0,70}?USD\s*([\d.,]+)/i)
+    // Current layout: "Créditos de uso USD 4.71 Disponibles para cualquier tarea".
+    || text.match(/(?:Créditos de uso|Usage credits)\s+USD\s*([\d.,]+)\s+(?:Disponibles|Available)/i);
+
+  // Current layout: "Límite de gasto mensual USD 0.29 de USD 100 este mes".
+  const spentOfLimit = text.match(
+    /(?:Límite de gasto mensual|Monthly spending limit)\s+USD\s*([\d.,]+)\s+(?:de|of)\s+USD\s*([\d.,]+)/i,
+  );
 
   return {
     enabled: true,
-    spent_usd: spent ? number(spent[1]) : null,
+    spent_usd: spent ? number(spent[1]) : spentOfLimit ? number(spentOfLimit[1]) : null,
     spent_percent: spentPercent ? number(spentPercent[1]) : null,
-    limit_usd: limit ? number(limit[1]) : null,
+    limit_usd: limit ? number(limit[1]) : spentOfLimit ? number(spentOfLimit[2]) : null,
     balance_usd: balance ? number(balance[1]) : null,
     reset_label: reset?.[1]?.trim() ?? null,
   };
@@ -192,6 +220,8 @@ export function parseClaude(raw) {
     throw Object.assign(new Error('No pude parsear Claude usage.'), { code: 'page_changed' });
   }
 
+  const credits = parseClaudeCredits(text);
+
   return {
     ok: true,
     source: 'web',
@@ -202,6 +232,7 @@ export function parseClaude(raw) {
       used: routines ? number(routines[1]) : null,
       limit: routines ? number(routines[2]) : null,
     },
-    credits: parseClaudeCredits(text),
+    credits,
+    billing: claudeBillingFromCredits(credits),
   };
 }

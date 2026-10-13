@@ -93,10 +93,21 @@ ln -sf "$(pwd)/scripts/ai-usage-doctor.mjs" ~/.local/bin/ai-usage-doctor
 ln -sf "$NODE_BIN" ~/.local/bin/node
 
 # La fuente preferida de Codex usa `codex app-server`. systemd no hereda
-# necesariamente el PATH de la terminal (en este equipo Codex viene de Zed),
-# por lo que publicamos un enlace estable cuando el CLI ya está disponible.
-if command -v codex >/dev/null 2>&1; then
-  codex_path="$(command -v codex)"
+# necesariamente el PATH de la terminal y Codex Desktop/Zed pueden incluir el
+# binario sin publicar un comando global, así que también revisamos sus rutas.
+codex_path="$(command -v codex 2>/dev/null || true)"
+if [ -z "$codex_path" ]; then
+  for candidate in \
+    /usr/lib/chatgpt/resources/codex \
+    /opt/chatgpt/resources/codex \
+    "$HOME/.local/share/zed/external_agents/registry/npx/codex-acp/node_modules/@openai/codex/bin/codex.js"; do
+    if [ -x "$candidate" ]; then
+      codex_path="$candidate"
+      break
+    fi
+  done
+fi
+if [ -n "$codex_path" ]; then
   if [ "$codex_path" != "$HOME/.local/bin/codex" ]; then
     ln -sf "$codex_path" ~/.local/bin/codex
   fi

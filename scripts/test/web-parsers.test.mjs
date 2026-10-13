@@ -64,3 +64,38 @@ test('keeps working when Claude omits reset captions', () => {
   assert.equal(result.session.reset_epoch, null);
   assert.equal(result.weekly.used_percent, 25);
 });
+
+test('derives the normalized billing block from the Claude web page', () => {
+  const result = parseClaude(`
+    Sesión actual 0% usado
+    Todos los modelos Se restablece en 21 h 8 min 13% usado
+    Créditos de uso
+    USD 4.40 gastado
+    22% usado
+    USD 20.00
+    Límite de gasto mensual
+  `);
+
+  assert.equal(result.session.state, 'idle');
+  assert.equal(result.weekly.state, 'active');
+  // No balance on the page: the remaining limit is not money.
+  assert.equal(result.billing.available, null);
+  assert.equal(result.billing.limit_remaining, 15.6);
+  assert.equal(result.billing.percent, 22);
+});
+
+test('parses the current Claude credits layout (balance and monthly limit)', () => {
+  const result = parseClaude(`
+    Sesión actual Se restablece en 3 h 58 min 75% usado
+    Todos los modelos Se restablece en 5 d 10 h 14% usado
+    Créditos de uso USD 4.71
+    Disponibles para cualquier tarea. Los créditos promocionales se usan antes que los créditos comprados.
+    Límite de gasto mensual
+    USD 0.29 de USD 100 este mes · Recarga automática desactivada
+  `);
+
+  assert.equal(result.credits.balance_usd, 4.71);
+  assert.equal(result.credits.spent_usd, 0.29);
+  assert.equal(result.credits.limit_usd, 100);
+  assert.equal(result.billing.available, 4.71);
+});

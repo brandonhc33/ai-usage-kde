@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { resolveCodexCommand } from './lib/structured-sources.mjs';
 
 const HOME = os.homedir();
 let failures = 0;
@@ -42,10 +43,7 @@ console.log('AI Usage KDE — diagnóstico\n');
 
 result(Number(process.versions.node.split('.')[0]) >= 18, 'Node.js', process.version);
 
-const codex = findExecutable([
-  path.join(HOME, '.local', 'bin', 'codex'),
-  'codex',
-]);
+const codex = await resolveCodexCommand({}).catch(() => null);
 result(Boolean(codex), 'Codex CLI', codex ?? 'no encontrado; se usará fallback web', false);
 
 const credentialsFile = path.join(HOME, '.claude', '.credentials.json');
@@ -55,11 +53,19 @@ const oauthValid = Boolean(
   && credentials?.scopes?.includes('user:profile')
   && Number(credentials?.expiresAt) > Date.now(),
 );
+function hoursUntil(epochMs) {
+  const hours = (Number(epochMs) - Date.now()) / 3_600_000;
+  return hours >= 1 ? `${Math.floor(hours)} h` : `${Math.max(0, Math.round(hours * 60))} min`;
+}
+
+const tokenExpired = Boolean(credentials?.accessToken) && Number(credentials?.expiresAt) <= Date.now();
 const oauthDetail = !credentials
   ? 'no encontrado; se usará fallback web'
   : oauthValid
-    ? `válido hasta ${new Date(credentials.expiresAt).toLocaleString()}`
-    : 'ausente, expirado o sin scope user:profile; se usará fallback web';
+    ? `válido hasta ${new Date(credentials.expiresAt).toLocaleString()} (quedan ${hoursUntil(credentials.expiresAt)})`
+    : tokenExpired
+      ? 'expirado: se conserva el último dato hasta que uses Claude Code (renueva el token)'
+      : 'ausente o sin scope user:profile; se usará fallback web';
 result(oauthValid, 'Claude OAuth', oauthDetail, false);
 
 const browser = findExecutable([
@@ -108,6 +114,16 @@ const timer = spawnSync('systemctl', ['--user', 'is-enabled', 'ai-usage-collecto
   encoding: 'utf8',
 });
 result(timer.status === 0, 'Timer systemd', (timer.stdout || timer.stderr).trim() || 'no instalado');
+
+const providerState = await readJson(path.join(HOME, '.cache', 'ai-usage-status', 'provider-state.json'));
+for (const [provider, incident] of Object.entries(providerState ?? {})) {
+  result(
+    false,
+    `Incidente activo (${provider})`,
+    `${incident.code} en ${incident.phase ?? '?'}, ${incident.count} veces desde ${incident.first_at}`,
+    false,
+  );
+}
 
 console.log(`\n${failures === 0 ? 'Todo listo.' : `${failures} comprobaciones requieren atención.`}`);
 process.exitCode = failures === 0 ? 0 : 1;

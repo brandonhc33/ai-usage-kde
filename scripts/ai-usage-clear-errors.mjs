@@ -12,6 +12,7 @@ const HOME = os.homedir();
 const CACHE_DIR = path.join(HOME, '.cache', 'ai-usage-status');
 const STATUS_FILE = path.join(CACHE_DIR, 'status.json');
 const ERROR_LOG_FILE = path.join(CACHE_DIR, 'errors.log');
+const PROVIDER_STATE_FILE = path.join(CACHE_DIR, 'provider-state.json');
 const LOCK_FILE = path.join(CACHE_DIR, 'collector.lock');
 const LOCK_STALE_MS = 10 * 60 * 1000;
 
@@ -61,6 +62,10 @@ async function main() {
   await writeAtomic(STATUS_FILE, status);
 
   await fs.rm(ERROR_LOG_FILE, { force: true });
+  // Forget known incidents too: otherwise a failure that is still happening
+  // would not be written again to the now empty log (and its web backoff
+  // would keep running).
+  await fs.rm(PROVIDER_STATE_FILE, { force: true });
 }
 
 main().catch((error) => {

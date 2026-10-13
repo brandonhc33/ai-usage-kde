@@ -27,6 +27,7 @@
       "source": "auto",
       "oauth_credentials_file": "~/.claude/.credentials.json",
       "oauth_timeout_ms": 30000,
+      "on_oauth_expired": "keep_last",
       "url": "https://claude.ai/new#settings/usage",
       "profile_dir": "~/.config/ai-usage-status/profiles/claude",
       "headless": true,
