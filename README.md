@@ -25,6 +25,9 @@ required for normal use.
 
 The widget works with either provider enabled. You do not need both.
 
+Codex is also detected when it is bundled by Codex Desktop or Zed's external
+agent, even when those applications have not published `codex` in `PATH`.
+
 ## Initial setup
 
 ### Arch Linux, CachyOS and Manjaro
@@ -134,6 +137,9 @@ cd ai-usage-kde
 
 For the optional web fallback, install Google Chrome or Chromium and `xvfb`.
 The structured Codex and Claude sources remain the recommended mode.
+If Chrome exits while starting inside Xvfb, the collector retries in headless
+mode and remembers that choice for the installed browser version. A Chrome
+upgrade automatically causes the preferred mode to be checked again.
 
 ## Configuration
 
@@ -156,6 +162,22 @@ Supported source values are:
 
 The KDE Store package always treats `auto` as structured-only. Explicit web
 mode is available only with the optional full installation.
+
+Claude Code renews its OAuth token only while it is in use. When the token has
+expired (typically before the first Claude Code use of the day), the default
+`"on_oauth_expired": "keep_last"` keeps the last Claude data, shown in gray
+with a notice, instead of scraping claude.ai. Set it to `"web"` to use the web
+fallback instead.
+
+### Widget settings
+
+Right-click the widget > **Configure AI Usage…** > **Panel** to choose what
+the panel shows: percent used or left, session reset, the weekly percent
+and reset day (optionally on a second line), available credit, or a custom
+template. The tooltip always lists every window, reset and credit.
+
+For reset presets, **Mostrar reinicio como** lets you choose the countdown
+(`3h56`), the local reset time (`17:24`), or both (`3h56 · 17:24`).
 
 ## Privacy and security
 

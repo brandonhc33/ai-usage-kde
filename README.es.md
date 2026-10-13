@@ -26,6 +26,9 @@ ejecutar npm ni automatizar un navegador.
 El widget funciona con uno o con ambos proveedores. No es obligatorio tener
 los dos.
 
+Codex también se detecta cuando viene incluido en Codex Desktop o en el agente
+externo de Zed, aunque esas aplicaciones no hayan publicado `codex` en `PATH`.
+
 ## Configuración inicial
 
 ### Arch Linux, CachyOS y Manjaro
@@ -136,6 +139,9 @@ cd ai-usage-kde
 
 Para el fallback web opcional, instala Google Chrome o Chromium y `xvfb`. Las
 fuentes estructuradas de Codex y Claude siguen siendo el modo recomendado.
+Si Chrome se cierra al iniciarse dentro de Xvfb, el colector reintenta en modo
+headless y recuerda esa selección para la versión instalada del navegador. Al
+actualizar Chrome se vuelve a comprobar automáticamente el modo preferido.
 
 ## Configuración
 
@@ -160,6 +166,23 @@ Los valores de fuente compatibles son:
 El paquete de KDE Store siempre interpreta `auto` como fuentes estructuradas.
 El modo web explícito solo está disponible con la instalación completa
 opcional.
+
+Claude Code solo renueva su token OAuth mientras se usa. Cuando está vencido
+(normalmente antes del primer uso de Claude Code en el día), la opción por
+defecto `"on_oauth_expired": "keep_last"` conserva los últimos datos de Claude,
+en gris y con un aviso, en vez de leer claude.ai con el navegador. Usa `"web"`
+para volver al fallback web.
+
+### Opciones del widget
+
+Clic derecho en el widget > **Configurar AI Usage…** > **Panel** para elegir
+qué se ve en el panel: % usado o restante, reinicio de sesión, % semanal y
+día del reinicio (opcionalmente en una segunda línea), crédito disponible o una
+plantilla personalizada. El tooltip siempre muestra todas las ventanas,
+reinicios y créditos.
+
+En los formatos con reinicio, **Mostrar reinicio como** permite elegir tiempo
+restante (`3h56`), hora local (`17:24`) o ambos (`3h56 · 17:24`).
 
 ## Privacidad y seguridad
 

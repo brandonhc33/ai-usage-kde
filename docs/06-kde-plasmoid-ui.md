@@ -56,9 +56,17 @@ El motor mantiene esas fuentes conectadas y las actualiza cada cinco segundos.
 El colector reemplaza los JSON de manera atómica, así que la UI observa el
 snapshot anterior o el nuevo, nunca uno parcialmente escrito.
 
-Un `Timer` QML solicita una nueva lectura cada dos minutos. El lock del
-colector evita carreras si existen varias instancias del widget o también está
-habilitado el timer opcional de systemd.
+Un `Timer` QML ejecuta `ai-usage-collect --if-older-than <s>` cada
+`refreshMinutes` (2 por defecto, 0 lo desactiva). Si `status.json` se escribió
+hace menos de un intervalo, por ejemplo porque ya corrió el timer de systemd,
+el colector termina sin hacer nada; así dos planificadores no duplican el
+trabajo. **Actualizar ahora** y **Reintentar** usan `--force`, que además
+ignora la pausa del fallback web tras fallos repetidos. El lock del colector
+sigue evitando ejecuciones simultáneas.
+
+`status.json` solo se vuelve a interpretar cuando su contenido cambia. Las
+cuentas regresivas ("3h56", "hace 2 min") dependen de un único reloj de 30 s
+(`nowMs`) que `format.js` recibe como parámetro.
 
 Un backend C++ con `QFileSystemWatcher` sería razonable si el widget creciera o
 necesitara eventos instantáneos. Para tres archivos pequeños actualizados cada
@@ -67,20 +75,59 @@ operativa proporcional.
 
 ## Representación compacta
 
-Muestra un par icono + porcentaje por proveedor. Codex puede exponer:
+Muestra un icono y una o dos líneas de texto por proveedor. Lo que aparece se
+elige en **Configurar AI Usage… > Panel** (`contents/config/main.xml` +
+`ui/ConfigPanel.qml`):
 
-- 5 horas y semanal: se prefiere 5 horas;
-- solo semanal: se muestra semanal;
-- ninguna ventana: se muestra `--`.
+| Opción | Valores |
+|---|---|
+| Mostrar en el panel | % usado (por defecto) · % restante · reinicio de sesión · % + reinicio · personalizado |
+| Mostrar reinicio como | tiempo restante (`3h56`, por defecto) · hora local del reinicio (`17:24`) · ambos (`3h56 · 17:24`); aplica a los formatos con reinicio |
+| Semanal | agregar `S 51%` y/o el día del reinicio (`mié 09:50`), opcionalmente en una segunda línea |
+| Créditos | agregar el crédito disponible (`$4.71`) |
+| Sesión sin iniciar | atenuada, o reemplazada por el semanal |
+| Proveedores | Codex y/o Claude |
+| Actualizar cada | minutos; 0 = solo el timer de systemd |
 
-Claude prefiere la sesión y cae a semanal si fuera necesario. Un sufijo `!`
-indica que el snapshot está marcado como stale o tiene más de 15 minutos.
+La plantilla personalizada acepta `{used}`, `{left}`, `{reset_in}`,
+`{reset_at}`, `{w_used}`, `{w_left}`, `{w_reset_in}`, `{w_reset_day}` y
+`{money}`; `\n` inicia una segunda línea. `format.js::panelEntries()` convierte
+la plantilla en segmentos `{ text, severity }`, de modo que cada valor se
+colorea según su propia ventana.
+
+La ventana corta es 5 horas en Codex y la sesión en Claude. Si Codex solo
+expone el límite semanal, se muestra ese valor con el prefijo `S`. Una ventana
+sin iniciar (sin uso ni hora de reinicio) se muestra en gris. Un sufijo `!`
+indica que el snapshot está marcado como stale o tiene más de 15 minutos;
+Claude con el token de Claude Code vencido se muestra en gris, sin `!`, porque
+es un estado conocido y no un error. En paneles verticales cada parte va en su
+propia línea.
+
+El tooltip lista todas las ventanas con su reinicio, los créditos y los avisos,
+para no tener que abrir el popup.
+
+Los valores del panel usan `SeverityText.qml`. Temas de panel como Panel
+Colorizer asignan `color` directamente a cada `Text` de los widgets (por
+ejemplo al abrir el popup), lo que borra el binding y deja todo en el color del
+tema; `SeverityText` restaura el color de severidad cuando eso ocurre.
 
 ## Popup
 
-El popup muestra únicamente métricas realmente disponibles. No deja una fila
+El popup muestra únicamente métricas realmente disponibles. Cada proveedor
+usa `ProviderCard.qml`: plan, fuente (CLI, OAuth o web) y antigüedad del dato,
+más un aviso cuando el token de Claude Code venció. Los créditos aparecen al
+final de la card de su proveedor: Claude muestra el saldo disponible y el
+límite de gasto mensual (un tope, no dinero) con lo gastado contra él; Codex
+muestra sus créditos y reinicios gratis de límites. No deja una fila
 de “5 horas --” cuando la cuenta Codex solo tiene límite semanal, ni una fila de
 rutinas vacía cuando Claude no entrega esa cuota.
+
+Las cuotas de Codex y Claude, los créditos de uso, los avisos y las acciones se
+agrupan en cards nativas de Kirigami. Los porcentajes semánticos se dibujan con
+texto de color explícito para que la paleta activa del panel no los reemplace al
+abrir el popup, y cada cuota incluye una barra de progreso para facilitar el
+escaneo. Un error ofrece **Reintentar** como acción principal; **Descartar
+aviso** solamente oculta el estado de error y no se presenta como una reparación.
 
 Los colores de severidad están centralizados en
 `package/contents/code/format.js`:

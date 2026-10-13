@@ -33,6 +33,11 @@ Para el fallback web invisible:
 sudo apt install chromium xvfb
 ```
 
+Si una combinación concreta de Chrome, X11 y Xvfb hace caer el proceso del
+navegador, el colector cambia automáticamente a headless y guarda la decisión
+en `~/.cache/ai-usage-status/browser-display-mode.json`. La marca solo se
+reutiliza mientras no cambie el ejecutable de Chrome.
+
 Ubuntu/Kubuntu 24.04 usa Plasma 5 y no es compatible con este plasmoide.
 
 Chrome/Chromium solo es obligatorio para autenticación y fallback. El camino
@@ -100,6 +105,11 @@ systemctl --user enable --now ai-usage-collector.timer
 `OnUnitInactiveSec` programa la siguiente ejecución desde el final de la
 anterior, evitando carreras si un fallback web demora. El lock del colector es
 una segunda defensa frente a ejecuciones manuales simultáneas.
+
+El widget tiene su propio timer, pero llama al colector con `--if-older-than`:
+si el timer de systemd acaba de escribir `status.json`, no repite el trabajo.
+Para dejar solo el de systemd, pon **Actualizar cada** en 0 en la
+configuración del widget.
 
 ## Verificación
 
