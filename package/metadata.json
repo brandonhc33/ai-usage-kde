@@ -16,7 +16,7 @@
         "License": "MIT",
         "Name": "AI Usage",
         "Name[es]": "AI Usage",
-        "Version": "0.5.3",
+        "Version": "0.6.0",
         "Website": "https://github.com/brandonhc33/ai-usage-kde"
     },
     "X-Plasma-API-Minimum-Version": "6.0"

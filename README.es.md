@@ -106,7 +106,7 @@ popup para reintentar después de iniciar sesión en Codex o Claude.
 ### Archivo `.plasmoid` local
 
 ```bash
-kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.5.3.plasmoid
+kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.6.0.plasmoid
 ```
 
 Para una actualización, usa `--upgrade` en lugar de `--install`.

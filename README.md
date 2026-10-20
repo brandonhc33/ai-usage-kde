@@ -105,7 +105,7 @@ retry after signing in to Codex or Claude.
 ### Local `.plasmoid` file
 
 ```bash
-kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.5.3.plasmoid
+kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.6.0.plasmoid
 ```
 
 For an update, use `--upgrade` instead of `--install`.
