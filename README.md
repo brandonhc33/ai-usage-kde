@@ -233,11 +233,24 @@ usage tracks have visible outlines.
 
 ### Google Antigravity
 
-Choose **Añadir cuenta** > **Google Antigravity**. Open Antigravity (app or IDE)
-and sign in with Google first. It must remain open to refresh usage. The widget
-only reads the local quota service. It sends no prompts and copies no Google
-OAuth credentials. Local CSRF tokens stay in memory and are never stored in
-configuration or status files.
+Antigravity has no usage web page; its weekly quota is read from the official
+`agy` CLI, which works with the desktop app closed. Install it and sign in with
+Google once:
+
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash   # installs ~/.local/bin/agy
+agy                                                            # opens Google sign-in; then close the CLI
+agy -p /usage                                                  # check your quota
+```
+
+Then choose **Añadir cuenta** > **Google Antigravity**. The collector runs
+`agy -p /usage --output-format json`, which answers without an agent turn,
+quota use, or a new conversation. If the CLI is signed out, the collector never
+opens a browser: the card asks you to run `agy`. Without the CLI, the local
+quota service of the app (or IDE) is the fallback, and it must remain open; if
+it is closed too, the card shows the install command. The widget sends no
+prompts and copies no Google OAuth credentials. Local CSRF tokens stay in
+memory and are never stored in configuration or status files.
 
 Each card is bound to the Google identity detected at connection time. If
 multiple accounts are open, enter the account email to select one. Switching
@@ -245,12 +258,15 @@ accounts in Antigravity never substitutes another identity's usage. A mismatch
 keeps the previous snapshot temporarily and displays a notice. Disconnecting
 from the widget preserves the session in Antigravity.
 
-Session and weekly limits are shown when provided. Older IDE responses that
+Models share two independent weekly quotas (Gemini and Claude + GPT); an
+unused quota shows as "Sin iniciar" because its week starts with the first
+message. Session and weekly limits are shown when provided. Older IDE responses that
 only expose model quotas retain those quotas without guessing their duration.
 Unknown usage stays unavailable (`--`), and the panel shows the highest known
 usage percentage.
 
-This integration is experimental because Antigravity's local API is internal.
+This integration is experimental: the CLI account is identified from its run
+log, and the app's local API is internal.
 It does not monitor Gemini CLI or Gemini API billing. References:
 [Google Antigravity plans](https://antigravity.google/docs/plans) and
 [CodexBar's local protocol documentation](https://github.com/steipete/CodexBar/blob/main/docs/antigravity.md).

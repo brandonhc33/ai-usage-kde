@@ -242,11 +242,25 @@ contraste sin recurrir a transparencia; las barras tienen un contorno visible.
 
 ### Google Antigravity
 
-Selecciona **Añadir cuenta** > **Google Antigravity**. Abre primero Antigravity
-(la aplicación o el IDE), inicia sesión con Google y deja la aplicación abierta
-para actualizar el consumo. El widget consulta únicamente el servicio local de
-cuotas: no envía prompts ni copia tokens OAuth de Google. El token CSRF local
-se mantiene en memoria y nunca se escribe en la configuración ni en el estado.
+Antigravity no tiene una página web de consumo; la cuota semanal se lee del
+CLI oficial `agy`, que funciona aunque la aplicación de escritorio esté cerrada.
+Instálalo e inicia sesión con Google una vez:
+
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash   # instala ~/.local/bin/agy
+agy                                                            # abre el login de Google; luego cierra el CLI
+agy -p /usage                                                  # comprueba tu cuota
+```
+
+Luego selecciona **Añadir cuenta** > **Google Antigravity**. El colector ejecuta
+`agy -p /usage --output-format json`, que responde sin iniciar un turno del
+agente, sin gastar cuota y sin crear conversaciones. Si el CLI no tiene sesión,
+el colector nunca abre el navegador: la tarjeta pide ejecutar `agy`. Sin el CLI,
+se usa como respaldo el servicio local de la aplicación (o del IDE), que debe
+permanecer abierta; si tampoco está abierta, la tarjeta muestra el comando de
+instalación. El widget no envía prompts ni copia tokens OAuth de Google. El token
+CSRF local se mantiene en memoria y nunca se escribe en la configuración ni en el
+estado.
 
 La cuenta se vincula a su identidad de Google. Si hay varias sesiones locales,
 puedes escribir el correo para seleccionar la correcta. Cambiar de cuenta en
@@ -254,12 +268,16 @@ Antigravity no cambia la identidad de otra tarjeta; sus últimos datos se
 conservan temporalmente y se avisa de la diferencia. **Desconectar del widget**
 retira sus datos del widget y conserva el inicio de sesión de Antigravity.
 
-Se muestran cuotas de sesión y semanales cuando el servicio las proporciona.
+Los modelos se agrupan en dos cuotas semanales independientes (Gemini y
+Claude + GPT); una cuota sin uso aparece como «Sin iniciar» porque su semana
+empieza con el primer mensaje. Se muestran cuotas de sesión y semanales cuando
+el servicio las proporciona.
 En versiones del IDE que solo informan cuotas por modelo, se muestran esos
 límites sin inventar su duración. Los valores no informados aparecen como `--`.
 El panel usa el mayor porcentaje de consumo conocido.
 
-Esta integración es experimental porque la API local de Antigravity es interna.
+Esta integración es experimental: la cuenta del CLI se identifica desde su
+registro de ejecución y la API local de la aplicación es interna.
 No es una integración con Gemini CLI ni con la facturación de Gemini API.
 Referencias: [planes de Google Antigravity](https://antigravity.google/docs/plans)
 y [protocolo local documentado por CodexBar](https://github.com/steipete/CodexBar/blob/main/docs/antigravity.md).
