@@ -4,9 +4,11 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveCodexCommand } from './lib/structured-sources.mjs';
+import { CODEX_CLI_INSTALL, resolveCodexCommand } from './lib/structured-sources.mjs';
 import { expandHome, loadConfig } from './lib/accounts.mjs';
-import { discoverAntigravityServers } from './lib/antigravity.mjs';
+import {
+  ANTIGRAVITY_CLI_INSTALL, discoverAntigravityServers, resolveAntigravityCli,
+} from './lib/antigravity.mjs';
 
 const HOME = os.homedir();
 let failures = 0;
@@ -60,8 +62,11 @@ for (const account of config?.accounts ?? []) {
     continue;
   }
   if (account.provider === 'antigravity') {
-    const servers = await discoverAntigravityServers();
-    result(servers.length > 0, label, servers.length ? 'servicio local disponible' : 'abre Antigravity e inicia sesión con Google');
+    const cli = await resolveAntigravityCli(account.config).catch(() => null);
+    const servers = cli ? [] : await discoverAntigravityServers();
+    result(Boolean(cli) || servers.length > 0, label, cli ? `CLI agy disponible (${cli})`
+      : servers.length ? 'app abierta; instala el CLI para no depender de ella'
+        : `instala el CLI: ${ANTIGRAVITY_CLI_INSTALL}`);
   } else if (account.config.source === 'web') {
     result(Boolean(browser), label, browser ? 'fallback web' : 'requiere Chrome/Chromium');
   } else if (account.provider === 'codex') {
@@ -69,7 +74,8 @@ for (const account of config?.accounts ?? []) {
     const credentials = account.managed
       ? await readJson(path.join(expandHome(account.config.codex_home), 'auth.json')) : null;
     const usable = Boolean(command && (!account.managed || credentials?.tokens?.access_token));
-    result(usable, label, usable ? 'CLI estructurado disponible' : 'falta la CLI o una sesión guardada');
+    result(usable, label, usable ? 'CLI estructurado disponible'
+      : command ? 'inicia sesión desde la tarjeta del widget' : `instala el CLI: ${CODEX_CLI_INSTALL}`);
   } else {
     const credentials = (await readJson(expandHome(account.config.oauth_credentials_file)))?.claudeAiOauth;
     const valid = Boolean(credentials?.accessToken && credentials?.scopes?.includes('user:profile')

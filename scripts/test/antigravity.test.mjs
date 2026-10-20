@@ -6,8 +6,9 @@ import http from 'node:http';
 import { once } from 'node:events';
 import test from 'node:test';
 import {
-  antigravityIdentity, discoverAntigravityServers, fetchAntigravityLocal,
-  mapAntigravityUsage, portsFromProcTables, requestAntigravity,
+  antigravityIdentity, discoverAntigravityServers, fetchAntigravity, fetchAntigravityCli,
+  fetchAntigravityLocal, mapAntigravityCliUsage, mapAntigravityUsage, portsFromProcTables,
+  readAntigravityCli, requestAntigravity, resolveAntigravityCli,
 } from '../lib/antigravity.mjs';
 
 const now = new Date('2026-10-19T15:00:00Z');
@@ -127,4 +128,87 @@ test('process discovery scopes listeners to the same-user Antigravity process an
   assert.equal(servers[0].port, 0x1234);
   assert.equal(servers[0].csrfToken, 'private-test-csrf');
   assert.deepEqual(portsFromProcTables([table], new Set(['999'])), [0x5678]);
+});
+
+function cliPayload(fractions = { gemini: 0.75, thirdParty: 1 }) {
+  const bucket = (id, fraction) => ({ id, name: 'Weekly Limit Remaining', window: 'weekly',
+    ...(fraction === undefined ? {} : { remaining_fraction: fraction }), reset_time: '2026-10-26T15:00:00Z' });
+  return { status: 'SUCCESS', conversation_id: '',
+    response: 'Gemini Models\tWeekly Limit Remaining\t0%\t2026-10-26T15:00:00Z\n',
+    command: { name: 'usage', data: { groups: [
+      { name: 'Gemini Models', buckets: [bucket('gemini-weekly', fractions.gemini)] },
+      { name: 'Claude and GPT models', buckets: [bucket('3p-weekly', fractions.thirdParty)] },
+    ] } } };
+}
+
+test('maps agy /usage pools, treats an untouched quota as not started and recovers an omitted zero', () => {
+  const result = mapAntigravityCliUsage(cliPayload(), 'one@example.test', now);
+  assert.equal(result.source, 'antigravity-cli');
+  assert.equal(result.identity, antigravityIdentity('one@example.test'));
+  assert.deepEqual(result.quota_windows.map((w) => w.label), ['Gemini · Semanal', 'Claude + GPT · Semanal']);
+  assert.equal(result.weekly.used_percent, 25);
+  assert.equal(result.quota_windows[0].metric.reset_epoch, Date.parse('2026-10-26T15:00:00Z') / 1000);
+  // A full quota's reset is a moving "now + 7 days", not a real deadline.
+  assert.deepEqual(result.quota_windows[1].metric,
+    { used_percent: 0, remaining_percent: 100, reset_epoch: null, reset_label: null, state: 'idle' });
+  const exhausted = mapAntigravityCliUsage(cliPayload({ gemini: undefined, thirdParty: undefined }), 'one@example.test', now);
+  assert.equal(exhausted.quota_windows[0].metric.used_percent, 100);
+  assert.equal(exhausted.quota_windows[1].metric.state, 'unavailable');
+  assert.throws(() => mapAntigravityCliUsage({ status: 'ERROR', error: 'authentication failed or timed out' }, null),
+    { code: 'login_required' });
+  assert.throws(() => mapAntigravityCliUsage({ status: 'SUCCESS', command: {} }, 'one@example.test'), { code: 'invalid_response' });
+});
+
+test('the CLI source needs the signed-in account and refuses a different one', async () => {
+  const read = (email) => async () => ({ payload: cliPayload(), email });
+  const resolve = async () => '/fake/agy';
+  const config = { identity: antigravityIdentity('selected@example.test') };
+  const result = await fetchAntigravityCli(config, { resolve, read: read('selected@example.test') });
+  assert.equal(result.account_email, 'selected@example.test');
+  await assert.rejects(fetchAntigravityCli(config, { resolve, read: read('other@example.test') }), { code: 'account_mismatch' });
+  await assert.rejects(fetchAntigravityCli({}, { resolve, read: read(null) }), { code: 'invalid_response' });
+  await assert.rejects(resolveAntigravityCli({ cli_path: '/nonexistent/agy' }), { code: 'cli_missing' });
+});
+
+test('the CLI goes first; the app is the fallback and a closed app reports the CLI problem', async () => {
+  const cliSnapshot = { source: 'antigravity-cli' };
+  const appSnapshot = { source: 'antigravity-local' };
+  const failing = (code) => async () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(await fetchAntigravity({}, { cli: async () => cliSnapshot, app: () => assert.fail('app not needed') }), cliSnapshot);
+  assert.equal(await fetchAntigravity({}, { cli: failing('account_mismatch'), app: async () => appSnapshot }), appSnapshot);
+  await assert.rejects(fetchAntigravity({}, { cli: failing('cli_missing'), app: failing('app_not_running') }), { code: 'cli_missing' });
+  await assert.rejects(fetchAntigravity({}, { cli: failing('cli_missing'), app: failing('account_mismatch') }), { code: 'account_mismatch' });
+});
+
+test('agy runs without any way to open a browser and stops at a sign-in prompt', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-usage-agy-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'environment');
+  const fake = async (body) => {
+    const file = path.join(root, `agy-${Math.random().toString(36).slice(2)}`);
+    await fs.writeFile(file, `#!/bin/sh
+echo "$(command -v xdg-open) $BROWSER \${DISPLAY:-none} \${WAYLAND_DISPLAY:-none}" > ${marker}
+${body}
+`, { mode: 0o700 });
+    return file;
+  };
+  const work = path.join(root, 'work');
+  const signedIn = await fake(`echo 'I1 OAuth: authenticated successfully as One@Example.test' > "$6"
+printf '%s' '${JSON.stringify(cliPayload())}'`);
+  const result = await readAntigravityCli(signedIn, 5000, work);
+  assert.equal(result.email, 'one@example.test');
+  assert.equal(result.payload.status, 'SUCCESS');
+  const [opener, browser, display, wayland] = (await fs.readFile(marker, 'utf8')).trim().split(' ');
+  assert.ok(opener.startsWith(`${work}/agy-`) && opener === browser, opener);
+  assert.deepEqual([display, wayland], ['none', 'none']);
+  assert.deepEqual(await fs.readdir(work), []);
+
+  const started = Date.now();
+  const signedOut = await fake(`echo 'Authentication required. Please visit the URL to log in:' >&2
+xdg-open https://accounts.example.test
+exec sleep 30`);
+  await assert.rejects(readAntigravityCli(signedOut, 10_000, work), { code: 'login_required' });
+  assert.ok(Date.now() - started < 5000);
+  await assert.rejects(readAntigravityCli(await fake('exec sleep 30'), 200, work), { code: 'source_unavailable' });
+  assert.deepEqual(await fs.readdir(work), []);
 });

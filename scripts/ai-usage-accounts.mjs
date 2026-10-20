@@ -12,7 +12,7 @@ import {
   updateLegacyProviders,
 } from './lib/accounts.mjs';
 import { resolveCodexCommand } from './lib/structured-sources.mjs';
-import { fetchAntigravityLocal } from './lib/antigravity.mjs';
+import { fetchAntigravity } from './lib/antigravity.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 
@@ -148,7 +148,7 @@ async function login(id, inTerminal) {
   if (selected.provider === 'antigravity') {
     const release = await acquireLock(loginLock(id));
     try {
-      const snapshot = await fetchAntigravityLocal(selected.config);
+      const snapshot = await fetchAntigravity(selected.config);
       return await mutate((config) => {
         const account = accountById(config, id);
         account.config = { ...account.config, identity: snapshot.identity, source: 'local' };
@@ -220,7 +220,7 @@ export async function main(args = process.argv.slice(2)) {
     let localSnapshot = null;
     if (target === 'antigravity' && (args.includes('--local') || args.includes('--import') || args.includes('--login'))) {
       const emailIndex = args.indexOf('--email');
-      localSnapshot = await fetchAntigravityLocal({ expected_email: emailIndex === -1 ? null : args[emailIndex + 1] });
+      localSnapshot = await fetchAntigravity({ expected_email: emailIndex === -1 ? null : args[emailIndex + 1] });
     }
     const result = await mutate(async (config) => {
       const account = { id, provider: target, label: name, enabled: true, managed: true, logged_out: true };

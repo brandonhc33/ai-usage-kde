@@ -19,6 +19,10 @@ async function fixture(t) {
   await fs.mkdir(path.dirname(configFile), { recursive: true });
   await fs.mkdir(cache, { recursive: true });
   await fs.writeFile(configFile, JSON.stringify(config));
+  // Shadows any real agy in PATH: a signed-out Antigravity CLI by default.
+  const agy = path.join(home, '.local/bin/agy');
+  await fs.mkdir(path.dirname(agy), { recursive: true });
+  await fs.writeFile(agy, `#!${process.execPath}\nconsole.log('{"status":"ERROR","error":"authentication failed or timed out"}');\n`, { mode: 0o700 });
   const env = { ...process.env, HOME: home, AI_USAGE_STRUCTURED_ONLY: '1' };
   delete env.CODEX_HOME;
   delete env.CLAUDE_CONFIG_DIR;
@@ -31,7 +35,7 @@ async function fixture(t) {
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
   };
-  return { home, configFile, cache, config, env, run, account, json };
+  return { home, configFile, cache, config, env, run, account, json, agy };
 }
 
 test('migrates enabled legacy providers and preserves custom source paths', () => {
@@ -312,4 +316,29 @@ server.listen(0,'127.0.0.1', () => console.log('ready'));
   assert.equal(status.accounts[0].logged_out, true);
   assert.equal(status.accounts[0].quota, undefined);
   assert.equal(child.exitCode, null);
+});
+
+test('Antigravity connects and collects through the CLI with the desktop app closed', async (t) => {
+  const f = await fixture(t);
+  const email = 'cli@example.test';
+  await fs.writeFile(f.agy, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.slice(0, 5).join(' ') !== '-p /usage --output-format json --log-file') process.exit(9);
+fs.writeFileSync(args[5], 'I1020 server_oauth.go:229] OAuth: authenticated successfully as ${email}\\n');
+console.log(JSON.stringify({ status: 'SUCCESS', response: '', command: { name: 'usage', data: { groups: [
+  { name: 'Gemini Models', buckets: [{ id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly',
+    remaining_fraction: 0.6, reset_time: new Date(Date.now() + 86400000).toISOString() }] },
+] } } }));
+`, { mode: 0o700 });
+  const account = f.account('add', 'antigravity', 'Google', '--local');
+  assert.equal(account.logged_out, false);
+  const collected = f.run(collector);
+  assert.equal(collected.status, 0, collected.stderr);
+  const [snapshot] = JSON.parse(collected.stdout).accounts;
+  assert.equal(snapshot.source, 'antigravity-cli');
+  assert.equal(snapshot.account_email, email);
+  assert.equal(snapshot.weekly.used_percent, 40);
+  assert.deepEqual(snapshot.quota_windows.map((window) => window.label), ['Gemini · Semanal']);
+  assert.deepEqual((await fs.readdir(f.cache)).filter((name) => name.startsWith('agy-')), []);
 });

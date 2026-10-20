@@ -14,7 +14,7 @@ import {
   webBackoffUntil,
 } from './lib/provider-state.mjs';
 import { fetchClaudeOAuth, fetchCodexCli } from './lib/structured-sources.mjs';
-import { fetchAntigravityLocal } from './lib/antigravity.mjs';
+import { fetchAntigravity } from './lib/antigravity.mjs';
 import { readAccountEmail } from './lib/account-identity.mjs';
 import {
   DEFAULT_CONFIG, normalizeConfig, publicAccount, disconnectedAccount, acquireLock, loadConfig,
@@ -314,19 +314,22 @@ async function collectProvider(
     }
   }
 
+  let result;
   const backoffUntil = webBackoffUntil(providerState[name]);
   if (!FORCE && Date.now() < backoffUntil) {
     console.warn(
       `${name}: fallback web en pausa hasta ${new Date(backoffUntil).toISOString()} `
       + `tras ${providerState[name].count} fallos (${providerState[name].code}).`,
     );
-    return {
+    result = {
       ...providerFailure('web', { code: providerState[name].code }),
       backoff_until: new Date(backoffUntil).toISOString(),
     };
+  } else {
+    result = await scrapeProvider(name, providerConfig, parser, readyPattern, fallbackFrom);
   }
-
-  return scrapeProvider(name, providerConfig, parser, readyPattern, fallbackFrom);
+  // The web page is only a fallback: without the CLI, installing it is the fix.
+  return !result.ok && fallbackFrom?.code === 'cli_missing' ? { ...result, error_code: 'cli_missing' } : result;
 }
 
 function buildPrimary(config, status) {
@@ -460,7 +463,7 @@ function mergeProviderFields(providerName, provider, previousProvider) {
   // una ventana ya no existe (por ejemplo Codex pasó de 5 h + semanal a solo
   // semanal), conservarla desde el snapshot web anterior produciría datos
   // fantasma. El merge parcial se reserva para el parser web tolerante.
-  if (provider.source === 'codex-cli' || provider.source === 'claude-oauth' || provider.source === 'antigravity-local') {
+  if (['codex-cli', 'claude-oauth', 'antigravity-cli', 'antigravity-local'].includes(provider.source)) {
     return provider;
   }
 
@@ -521,16 +524,17 @@ function providerWithinFallbackWindow(provider, validMinutes) {
 // most, the usage made since; show it as not started instead of the old %.
 function expireElapsedWindows(provider, nowSeconds = Math.floor(Date.now() / 1000)) {
   const next = { ...provider };
+  const antigravity = String(provider.source).startsWith('antigravity-');
   for (const key of WINDOW_KEYS) {
     const metric = provider[key];
     if (hasObtainedValue(metric?.reset_epoch) && metric.reset_epoch <= nowSeconds) {
       next[key] = {
         ...metric,
-        used_percent: provider.source === 'antigravity-local' ? null : 0,
-        remaining_percent: provider.source === 'antigravity-local' ? null : 100,
+        used_percent: antigravity ? null : 0,
+        remaining_percent: antigravity ? null : 100,
         reset_label: null,
         reset_epoch: null,
-        state: provider.source === 'antigravity-local' ? 'unavailable' : 'idle',
+        state: antigravity ? 'unavailable' : 'idle',
       };
     }
   }
@@ -670,7 +674,7 @@ async function main() {
         account.id,
         account.config,
         isGoogle ? 'local' : isCodex ? 'cli' : 'oauth',
-        isGoogle ? fetchAntigravityLocal : isCodex ? fetchCodexCli : fetchClaudeOAuth,
+        isGoogle ? fetchAntigravity : isCodex ? fetchCodexCli : fetchClaudeOAuth,
         isCodex ? parseCodex : parseClaude,
         isCodex ? CODEX_READY : CLAUDE_READY,
       );

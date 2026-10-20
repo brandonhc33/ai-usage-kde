@@ -1,13 +1,20 @@
-// Read-only local Antigravity quota service. No prompts, OAuth grants, or
-// remote endpoints. CSRF tokens are read only from same-user processes and
-// are never persisted or returned in the public snapshot.
+// Read-only Antigravity quota sources: the `agy` CLI (`/usage` in print mode
+// answers without an agent turn, quota or conversation) and, as a fallback,
+// the desktop app's loopback service. No prompts, OAuth grants, or remote
+// endpoints of our own. CSRF tokens are read only from same-user processes
+// and are never persisted or returned in the public snapshot.
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import { createHash } from 'node:crypto';
 
 const SERVICE = '/exa.language_server_pb.LanguageServerService/';
+export const ANTIGRAVITY_CLI_INSTALL = 'curl -fsSL https://antigravity.google/cli/install.sh | bash';
+const CLI_AUTH_PROMPT = /authentication required|visit the url to log in/i;
+const CLI_ACCOUNT = /authenticated successfully as (\S+@\S+)/;
 const fail = (message, code) => Object.assign(new Error(message), { code });
 const hasValue = (value) => value !== null && value !== undefined && value !== '';
 
@@ -27,12 +34,16 @@ function resetEpoch(value) {
 function quotaMetric(fraction, reset, description) {
   const remaining = hasValue(fraction) && Number.isFinite(Number(fraction))
     ? Math.round(Math.max(0, Math.min(1, Number(fraction))) * 10000) / 100 : null;
+  // An untouched quota has not started: its reset is just "now + window" and
+  // moves on every refresh, so it is not shown.
+  const idle = remaining === 100;
+  const epoch = idle ? null : resetEpoch(reset);
   return {
     used_percent: remaining === null ? null : Math.round((100 - remaining) * 100) / 100,
     remaining_percent: remaining,
-    reset_epoch: resetEpoch(reset),
-    reset_label: resetEpoch(reset) === null ? description || null : null,
-    state: remaining === null ? 'unavailable' : 'active',
+    reset_epoch: epoch,
+    reset_label: epoch === null && !idle ? description || null : null,
+    state: remaining === null ? 'unavailable' : idle ? 'idle' : 'active',
   };
 }
 
@@ -106,6 +117,39 @@ export function mapAntigravityUsage(userPayload, summaryPayload = null, now = ne
     session: mostUsed(windows.filter((window) => window.cadence === 'session')),
     weekly: mostUsed(windows.filter((window) => window.cadence === 'weekly')),
   };
+}
+
+// "Claude and GPT models" → "Claude + GPT", the same pool labels as the app.
+const poolName = (name) => String(name || 'Cuota').replace(/\s+models?$/i, '').replace(/\s+and\s+/gi, ' + ');
+
+export function mapAntigravityCliUsage(payload, email, now = new Date()) {
+  if (payload?.status !== 'SUCCESS') {
+    throw /auth/i.test(String(payload?.error ?? ''))
+      ? fail('El CLI de Antigravity no tiene una sesión iniciada. Ejecuta agy en una terminal.', 'login_required')
+      : fail('El CLI de Antigravity no entregó sus cuotas.', 'source_unavailable');
+  }
+  const groups = payload.command?.data?.groups;
+  if (!Array.isArray(groups)) {
+    throw fail('El CLI de Antigravity respondió en un formato desconocido. Actualízalo con agy update.', 'invalid_response');
+  }
+  // JSON omits a zero fraction (quota exhausted); the printed table keeps it.
+  const printed = new Map(String(payload.response ?? '').split('\n').map((line) => line.split('\t'))
+    .filter((cells) => /^\d+(?:\.\d+)?%$/.test(cells[2] ?? ''))
+    .map((cells) => [`${cells[0]}\t${cells[1]}`, parseFloat(cells[2]) / 100]));
+  const summary = { groups: groups.map((group) => ({
+    displayName: poolName(group.name),
+    buckets: (group.buckets ?? []).map((bucket) => ({
+      bucketId: bucket.id, displayName: bucket.name, window: bucket.window, description: bucket.description,
+      remaining: { remainingFraction: bucket.remaining_fraction ?? printed.get(`${group.name}\t${bucket.name}`) },
+      resetTime: bucket.reset_time,
+    })),
+  })) };
+  return { ...mapAntigravityUsage({ userStatus: { email } }, summary, now), source: 'antigravity-cli' };
+}
+
+function matchesAccount(config, snapshot) {
+  return (!config.identity || config.identity === snapshot.identity)
+    && (!config.expected_email || config.expected_email.trim().toLowerCase() === snapshot.account_email);
 }
 
 function flag(args, name) {
@@ -243,4 +287,105 @@ export async function fetchAntigravityLocal(config = {}, dependencies = {}) {
   if (snapshots.size === 1) return [...snapshots.values()][0];
   if (mismatch) throw fail('La cuenta abierta en Antigravity es distinta. Abre la cuenta conectada a esta tarjeta.', 'account_mismatch');
   throw fail('No se pudieron consultar las cuotas locales. Actualiza Antigravity y vuelve a intentar.', 'source_unavailable');
+}
+
+export async function resolveAntigravityCli(config = {}, env = process.env) {
+  const home = os.homedir();
+  const configured = config.cli_path?.replace(/^~(?=$|\/)/, home);
+  const candidates = configured ? [configured] : [path.join(home, '.local', 'bin', 'agy'),
+    ...String(env.PATH ?? '').split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, 'agy'))];
+  for (const candidate of candidates) {
+    if (await fs.access(candidate, fs.constants.X_OK).then(() => true, () => false)) return candidate;
+  }
+  throw fail(`No se encontró el CLI de Antigravity (agy). Instálalo con: ${ANTIGRAVITY_CLI_INSTALL}`, 'cli_missing');
+}
+
+// Without a saved session agy opens a browser for Google sign-in. A background
+// refresh must never do that: URL openers resolve to a private no-op and the
+// run stops at the sign-in prompt. The temporary log, which names the signed-in
+// account, keeps per-run logs out of ~/.gemini and is deleted afterwards.
+export async function readAntigravityCli(command, timeoutMs = 20_000,
+  workRoot = path.join(os.homedir(), '.cache', 'ai-usage-status')) {
+  await fs.mkdir(workRoot, { recursive: true, mode: 0o700 });
+  const directory = await fs.mkdtemp(path.join(workRoot, 'agy-'));
+  try {
+    const shims = path.join(directory, 'bin');
+    const opener = path.join(shims, 'xdg-open');
+    await fs.mkdir(shims);
+    await fs.writeFile(opener, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+    await Promise.all(['x-www-browser', 'www-browser', 'sensible-browser']
+      .map((name) => fs.symlink(opener, path.join(shims, name))));
+    const logFile = path.join(directory, 'agy.log');
+    const env = { ...process.env, PATH: `${shims}${path.delimiter}${process.env.PATH ?? ''}`, BROWSER: opener };
+    delete env.DISPLAY;
+    delete env.WAYLAND_DISPLAY;
+    const stdout = await new Promise((resolve, reject) => {
+      const child = spawn(command, ['-p', '/usage', '--output-format', 'json', '--log-file', logFile],
+        { cwd: os.homedir(), env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '';
+      let errors = '';
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (child.exitCode === null) child.kill();
+        if (error) reject(error); else resolve(output);
+      };
+      const timer = setTimeout(() => finish(fail('El CLI de Antigravity no respondió a tiempo.', 'source_unavailable')), timeoutMs);
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        output += chunk;
+        if (output.length > 2 * 1024 * 1024) finish(fail('Respuesta del CLI demasiado grande.', 'invalid_response'));
+      });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => {
+        errors = `${errors}${chunk}`.slice(-4000);
+        if (CLI_AUTH_PROMPT.test(errors)) {
+          finish(fail('El CLI de Antigravity no tiene una sesión iniciada. Ejecuta agy en una terminal.', 'login_required'));
+        }
+      });
+      child.on('error', (error) => finish(fail(`No se pudo ejecutar agy: ${error.message}`, 'source_unavailable')));
+      child.on('close', () => finish(null));
+    });
+    let payload;
+    try { payload = JSON.parse(stdout); }
+    catch { throw fail('El CLI de Antigravity respondió en un formato desconocido. Actualízalo con agy update.', 'invalid_response'); }
+    const log = await fs.readFile(logFile, 'utf8').catch(() => '');
+    return { payload, email: CLI_ACCOUNT.exec(log)?.[1]?.trim().toLowerCase() ?? null };
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+}
+
+export async function fetchAntigravityCli(config = {}, dependencies = {}) {
+  const command = await (dependencies.resolve ?? resolveAntigravityCli)(config);
+  const timeoutMs = Math.max(1000, Math.min(60_000, Number(config.cli_timeout_ms) || 20_000));
+  const { payload, email } = await (dependencies.read ?? readAntigravityCli)(command, timeoutMs);
+  if (payload?.status === 'SUCCESS' && !email) {
+    // Never show quotas without knowing whose they are.
+    throw fail('No se pudo identificar la cuenta del CLI de Antigravity. Actualízalo con agy update.', 'invalid_response');
+  }
+  const snapshot = mapAntigravityCliUsage(payload, email);
+  if (!matchesAccount(config, snapshot)) {
+    throw fail('El CLI de Antigravity tiene iniciada otra cuenta de Google.', 'account_mismatch');
+  }
+  return snapshot;
+}
+
+// The CLI works with the desktop app closed, so it goes first. The app covers
+// machines without agy, or with a different Google account signed in to it.
+export async function fetchAntigravity(config = {}, dependencies = {}) {
+  let cliError;
+  try {
+    return await (dependencies.cli ?? fetchAntigravityCli)(config);
+  } catch (error) {
+    cliError = error;
+  }
+  try {
+    return await (dependencies.app ?? fetchAntigravityLocal)(config);
+  } catch (error) {
+    // With the app closed, the CLI failure is the actionable one.
+    throw error.code === 'app_not_running' ? cliError : error;
+  }
 }

@@ -11,6 +11,7 @@ const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CLAUDE_PREPAID_URL = 'https://api.anthropic.com/api/oauth/organizations/{org}/prepaid/credits';
 const CLAUDE_BETA_HEADER = 'oauth-2025-04-20';
 const CLAUDE_PREPAID_TIMEOUT_MS = 5000;
+export const CODEX_CLI_INSTALL = 'npm install -g @openai/codex';
 
 function sourceError(message, code = 'source_unavailable') {
   return Object.assign(new Error(message), { code });
@@ -312,7 +313,7 @@ export async function resolveCodexCommand(config = {}) {
   const configured = expandHome(config.cli_path);
   if (configured) {
     if (await executableExists(configured)) return configured;
-    throw sourceError(`No existe el ejecutable Codex configurado: ${configured}`);
+    throw sourceError(`No existe el ejecutable Codex configurado: ${configured}`, 'cli_missing');
   }
 
   const installedLink = path.join(HOME, '.local', 'bin', 'codex');
@@ -349,7 +350,7 @@ export async function resolveCodexCommand(config = {}) {
     if (await executableExists(candidate)) return candidate;
   }
 
-  throw sourceError('No se encontró el CLI de Codex.');
+  throw sourceError(`No se encontró el CLI de Codex. Instálalo con: ${CODEX_CLI_INSTALL}`, 'cli_missing');
 }
 
 function readCodexAppServer(command, timeoutMs, config = {}) {
