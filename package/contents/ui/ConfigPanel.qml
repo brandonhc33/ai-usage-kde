@@ -11,6 +11,7 @@ import "../code/format.js" as Format
 
 KCM.SimpleKCM {
     id: page
+    readonly property QtObject formColors: ContrastPalette { id: colors }
 
     property string cfg_panelPreset
     property string cfg_resetTimeFormat
@@ -18,10 +19,13 @@ KCM.SimpleKCM {
     property alias cfg_showWeekly: showWeeklyBox.checked
     property alias cfg_showWeeklyReset: showWeeklyResetBox.checked
     property alias cfg_twoLines: twoLinesBox.checked
+    property alias cfg_panelBold: panelBoldBox.checked
     property alias cfg_showMoney: showMoneyBox.checked
     property string cfg_idleWindow
     property alias cfg_showCodex: showCodexBox.checked
     property alias cfg_showClaude: showClaudeBox.checked
+    property alias cfg_showAntigravity: showAntigravityBox.checked
+    property alias cfg_showAccountNames: showAccountNamesBox.checked
     property alias cfg_refreshMinutes: refreshSpin.value
 
     readonly property bool custom: cfg_panelPreset === "custom"
@@ -87,7 +91,7 @@ KCM.SimpleKCM {
             Layout.maximumWidth: Kirigami.Units.gridUnit * 24
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
-            opacity: 0.7
+            color: colors.secondary
             text: "Ventana corta (5 h / sesión): {used} {left} {reset_in} {reset_at}\n"
                 + "Semanal: {w_used} {w_left} {w_reset_in} {w_reset_day}\n"
                 + "Créditos: {money} · Segunda línea: \\n"
@@ -108,6 +112,12 @@ KCM.SimpleKCM {
             id: twoLinesBox
             enabled: !page.custom && (showWeeklyBox.checked || showWeeklyResetBox.checked)
             text: "Usar una segunda línea para el semanal"
+        }
+
+        QQC2.CheckBox {
+            id: panelBoldBox
+            Kirigami.FormData.label: "Texto de la barra:"
+            text: "Usar negrita"
         }
 
         QQC2.CheckBox {
@@ -136,6 +146,7 @@ KCM.SimpleKCM {
             Layout.maximumWidth: Kirigami.Units.gridUnit * 24
             wrapMode: Text.Wrap
             font.family: "monospace"
+            font.bold: page.cfg_panelBold
             text: page.preview
         }
 
@@ -151,6 +162,22 @@ KCM.SimpleKCM {
         QQC2.CheckBox {
             id: showClaudeBox
             text: "Claude"
+        }
+        QQC2.CheckBox {
+            id: showAntigravityBox
+            text: "Google Antigravity"
+        }
+        QQC2.CheckBox {
+            id: showAccountNamesBox
+            Kirigami.FormData.label: "Cuentas:"
+            text: "Mostrar el nombre cuando haya varias del mismo proveedor"
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            text: "Abre el widget y usa la chincheta de cada cuenta para elegir cuáles aparecen en la barra. El desplegable siempre muestra todas."
         }
 
         RowLayout {

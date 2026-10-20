@@ -8,6 +8,7 @@
 // lanza ai-usage-collect / ai-usage-auth / ai-usage-clear-errors / xdg-open
 // vía el motor "executable" de Plasma5Support (ver docs/06-kde-plasmoid-ui.md).
 import QtQuick
+import QtQuick.Window
 import QtQuick.Layouts
 import QtQuick.Controls as QQC2
 import Qt.labs.platform as Platform
@@ -20,12 +21,14 @@ import org.kde.plasma.plasma5support as P5Support
 
 import "../code/format.js" as Format
 import "../code/status.js" as Status
+import "../code/layout.js" as PopupLayout
 
 PlasmoidItem {
     id: root
 
     readonly property string codexUsageUrl: "https://chatgpt.com/codex/settings/usage"
     readonly property string claudeUsageUrl: "https://claude.ai/new#settings/usage"
+    readonly property string antigravityUsageUrl: "https://antigravity.google/"
 
     readonly property string homeDir: {
         var url = Platform.StandardPaths.writableLocation(Platform.StandardPaths.HomeLocation).toString();
@@ -43,7 +46,7 @@ PlasmoidItem {
     property bool loading: false
     property bool autoCollecting: false
     property bool collectorLaunchFailed: false
-    readonly property bool isLoading: loading || collectorRunningFlag
+    readonly property bool isLoading: loading || autoCollecting || collectorRunningFlag || accountBusy
     readonly property bool errorLogHasEntries: errorLogSize > 0
     readonly property bool hasActiveErrors: statusState.kind === "loaded"
         && statusState.data.errors && statusState.data.errors.length > 0
@@ -53,13 +56,12 @@ PlasmoidItem {
     property double nowMs: Date.now()
 
     readonly property var status: statusState.kind === "loaded" ? statusState.data : null
-    readonly property var codex: status && status.codex ? status.codex : null
-    readonly property var claude: status && status.claude ? status.claude : null
+    readonly property var accounts: Format.accountsOf(status)
     readonly property var thresholds: status ? status.thresholds : null
-    readonly property var claudeBilling: Format.billingOf(claude)
-    readonly property bool codexCreditsVisible: !!codex && codex.ok === true
-        && (!!codex.credits || !!codex.reset_credits
-            || (codex.credits_remaining !== null && codex.credits_remaining !== undefined))
+    property bool accountBusy: false
+    property string accountCommand: ""
+    property string accountError: ""
+    property string accountNotice: ""
 
     readonly property var panelOptions: ({
         preset: Plasmoid.configuration.panelPreset,
@@ -72,6 +74,9 @@ PlasmoidItem {
         idleWindow: Plasmoid.configuration.idleWindow,
         showCodex: Plasmoid.configuration.showCodex,
         showClaude: Plasmoid.configuration.showClaude,
+        showAntigravity: Plasmoid.configuration.showAntigravity,
+        hiddenAccountIds: Plasmoid.configuration.hiddenAccountIds,
+        showAccountNames: Plasmoid.configuration.showAccountNames,
         stacked: Plasmoid.formFactor === PlasmaCore.Types.Vertical
     })
     readonly property var topbarEntries: Format.panelEntries(statusState, panelOptions, nowMs)
@@ -151,6 +156,9 @@ PlasmoidItem {
         Qt.resolvedUrl("../tools/ai-usage-collect.mjs"))
     readonly property string bundledClearErrorsPath: localFilePath(
         Qt.resolvedUrl("../tools/ai-usage-clear-errors.mjs"))
+    readonly property string bundledAccountsPath: localFilePath(
+        Qt.resolvedUrl("../tools/ai-usage-accounts.mjs"))
+    readonly property string installedAccountsPath: localBinDir + "/ai-usage-accounts"
     readonly property string installedCollectPath: localBinDir + "/ai-usage-collect"
     readonly property string installedClearErrorsPath: localBinDir + "/ai-usage-clear-errors"
 
@@ -191,6 +199,17 @@ PlasmoidItem {
                     root.autoCollecting = false;
                 }
                 root.reload();
+            } else if (sourceName === root.accountCommand) {
+                root.accountBusy = false;
+                root.accountCommand = "";
+                if (Number(data["exit code"]) !== 0) {
+                    root.accountError = String(data.stderr || "No se pudo completar la operación.").trim().slice(0, 500);
+                    root.accountNotice = "";
+                } else {
+                    root.accountNotice = "";
+                    root.runCollector();
+                }
+                root.reload();
             } else if (sourceName === root.clearErrorsCmd) {
                 root.reload();
             }
@@ -215,13 +234,59 @@ PlasmoidItem {
         executable.exec(root.collectAutoCmd);
     }
 
-    function runLogin(provider, url) {
-        var installedAuthPath = root.localBinDir + "/ai-usage-auth";
-        var command = "/bin/sh -c " + shellQuote(
-            "if [ -x " + shellQuote(installedAuthPath) + " ]; then "
-            + "exec " + shellQuote(installedAuthPath) + " " + shellQuote(provider) + "; "
-            + "else exec xdg-open " + shellQuote(url) + "; fi");
-        executable.exec(command);
+    function manageAccount(args, notice) {
+        if (root.isLoading) return;
+        root.accountError = "";
+        root.accountNotice = notice || "Guardando cambios…";
+        var quotedArgs = args.map(shellQuote).join(" ");
+        root.accountCommand = "/bin/sh -c " + shellQuote(
+            "if [ -f " + shellQuote(bundledAccountsPath) + " ]; then "
+            + "exec /usr/bin/env node " + shellQuote(bundledAccountsPath) + " " + quotedArgs + "; "
+            + "elif [ -x " + shellQuote(installedAccountsPath) + " ]; then "
+            + "exec " + shellQuote(installedAccountsPath) + " " + quotedArgs + "; "
+            + "else exit 127; fi");
+        root.accountBusy = true;
+        executable.exec(root.accountCommand);
+    }
+
+    function isPinned(account) {
+        return Plasmoid.configuration.hiddenAccountIds.indexOf(account.id) === -1
+            && providerVisible(account.provider);
+    }
+
+    function providerVisible(provider) {
+        return provider === "codex" ? Plasmoid.configuration.showCodex
+            : provider === "claude" ? Plasmoid.configuration.showClaude : Plasmoid.configuration.showAntigravity;
+    }
+
+    function connectAccount(account) {
+        if (account.provider === "antigravity") {
+            manageAccount(["login", account.id], "Conectando con Antigravity…");
+        } else {
+            manageAccount(["login", account.id, "--terminal"], "Completa el inicio de sesión en la ventana abierta…");
+        }
+    }
+
+    function togglePin(account) {
+        var hidden = Array.prototype.slice.call(Plasmoid.configuration.hiddenAccountIds);
+        var index = hidden.indexOf(account.id);
+        if (isPinned(account)) {
+            hidden.push(account.id);
+        } else {
+            if (index !== -1) hidden.splice(index, 1);
+            // Keep the existing provider-wide settings compatible with pins.
+            if (!providerVisible(account.provider)) {
+                root.accounts.forEach(function (other) {
+                    if (other.provider === account.provider && other.id !== account.id
+                        && hidden.indexOf(other.id) === -1) hidden.push(other.id);
+                });
+            }
+            if (account.provider === "codex") Plasmoid.configuration.showCodex = true;
+            else if (account.provider === "claude") Plasmoid.configuration.showClaude = true;
+            else Plasmoid.configuration.showAntigravity = true;
+        }
+        Plasmoid.configuration.hiddenAccountIds = hidden;
+        Plasmoid.configuration.writeConfig();
     }
 
     function openLink(url) {
@@ -237,39 +302,8 @@ PlasmoidItem {
         executable.exec(root.clearErrorsCmd);
     }
 
-    function sessionActive(provider) {
-        var data = root.status ? root.status[provider] : null;
-        if (!data) return false;
-        return Format.isSessionActive(data.ok, data.error_code);
-    }
-
-    function providerAction(provider, url) {
-        if (sessionActive(provider)) {
-            openLink(url);
-        } else {
-            runLogin(provider, url);
-        }
-    }
-
     function iconSource(kind) {
         return Qt.resolvedUrl("../icons/" + kind + "-orb.svg");
-    }
-
-    function failedProvidersLabel() {
-        if (!root.hasActiveErrors) return "";
-        var names = [];
-        var seen = {};
-        root.statusState.data.errors.forEach(function (error) {
-            var name = error.provider === "codex" ? "Codex"
-                : error.provider === "claude" ? "Claude" : "el colector";
-            if (!seen[name]) {
-                seen[name] = true;
-                names.push(name);
-            }
-        });
-        return names.length === 1
-            ? "No se pudo actualizar " + names[0] + "."
-            : "No se pudieron actualizar " + names.join(" y ") + ".";
     }
 
     Timer {
@@ -316,7 +350,7 @@ PlasmoidItem {
                 delegate: GridLayout {
                     id: entry
 
-                    readonly property bool compactFont: modelData.lines.length > 1 || compactRoot.vertical
+                    readonly property bool compactFont: modelData.lines.length > 1 || !!modelData.showAccountName || compactRoot.vertical
 
                     columns: compactRoot.vertical ? 1 : 2
                     columnSpacing: 4
@@ -333,6 +367,17 @@ PlasmoidItem {
                         spacing: 0
                         Layout.alignment: compactRoot.vertical ? Qt.AlignHCenter : Qt.AlignVCenter
 
+                        SeverityText {
+                            severity: "muted"
+                            visible: !!modelData.showAccountName
+                            text: modelData.accountLabel || ""
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 6
+                            font.family: Kirigami.Theme.smallFont.family
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize
+                            font.bold: Plasmoid.configuration.panelBold
+                        }
                         Repeater {
                             model: modelData.lines
                             delegate: Row {
@@ -345,8 +390,11 @@ PlasmoidItem {
                                     delegate: SeverityText {
                                         text: modelData.text
                                         severity: modelData.severity
-                                        font: entry.compactFont
+                                        readonly property font baseFont: entry.compactFont
                                             ? Kirigami.Theme.smallFont : Kirigami.Theme.defaultFont
+                                        font.family: baseFont.family
+                                        font.pointSize: baseFont.pointSize
+                                        font.bold: Plasmoid.configuration.panelBold
                                     }
                                 }
                             }
@@ -367,374 +415,414 @@ PlasmoidItem {
 
     // --- Full representation (popup) -------------------------------------
 
-    fullRepresentation: ColumnLayout {
+    fullRepresentation: QQC2.Control {
         id: fullRoot
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 22
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 20
-        Layout.margins: Kirigami.Units.largeSpacing
+        Kirigami.Theme.inherit: false
+        Kirigami.Theme.colorSet: Kirigami.Theme.Window
+        readonly property QtObject windowColors: ContrastPalette { id: popupColors }
+        background: Rectangle { color: popupColors.surface }
+        readonly property real outerPadding: Kirigami.Units.largeSpacing
+        readonly property real laneGap: Kirigami.Units.largeSpacing * 1.5
+        readonly property var arrangement: PopupLayout.plan(root.accounts, {
+            screenWidth: Math.max(320, Screen.width - 48),
+            screenHeight: Math.max(280, Screen.height - 96),
+            cardWidth: Kirigami.Units.gridUnit * 20,
+            minimumCardWidth: Kirigami.Units.gridUnit * 16,
+            cardHeight: Kirigami.Units.gridUnit * 12,
+            padding: outerPadding, gap: laneGap,
+            columns: Plasmoid.configuration.popupColumns,
+            rows: Plasmoid.configuration.popupRows,
+            autoWidth: Plasmoid.configuration.popupAutoWidth,
+            autoHeight: Plasmoid.configuration.popupAutoHeight,
+            width: Plasmoid.configuration.popupWidth,
+            height: Plasmoid.configuration.popupHeight
+        })
+        readonly property real fittedHeight: contentColumn.implicitHeight + header.implicitHeight
+            + footer.implicitHeight + 4 * outerPadding + 4
+        Layout.preferredWidth: arrangement.width
+        Layout.minimumWidth: Math.min(arrangement.width, Kirigami.Units.gridUnit * 18)
+        readonly property real dialogHeight: Math.max(
+            layoutDialog.visible ? layoutDialog.implicitHeight : 0,
+            addDialog.visible ? addDialog.implicitHeight : 0,
+            renameDialog.visible ? renameDialog.implicitHeight : 0)
+        Layout.preferredHeight: Math.min(arrangement.maxHeight, Math.max(dialogHeight > 0 ? dialogHeight + 24 : 0,
+            arrangement.autoHeight ? Math.max(280, fittedHeight) : arrangement.height))
+        Layout.minimumHeight: Math.min(280, Layout.preferredHeight)
+        padding: 0
+        contentItem: ColumnLayout {
+            spacing: 0
 
-        spacing: Kirigami.Units.largeSpacing
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Kirigami.Units.largeSpacing
-
-            Kirigami.Icon {
-                source: root.iconSource("ai")
-                Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                Layout.preferredHeight: Kirigami.Units.iconSizes.medium
-            }
-
-            ColumnLayout {
+            RowLayout {
+                id: header
                 Layout.fillWidth: true
-                spacing: 0
-
-                PlasmaExtras.Heading {
-                    level: 3
-                    text: "AI Usage"
-                }
-                QQC2.Label {
-                    visible: root.statusState.kind === "loaded"
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    opacity: 0.7
-                    font: Kirigami.Theme.smallFont
-                    text: root.status ? Format.updatedAtLine(root.status, root.nowMs) : ""
-                }
-            }
-
-            PlasmaComponents3.BusyIndicator {
-                visible: root.isLoading
-                running: visible
-                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-            }
-        }
-
-        // Missing status.json
-        Kirigami.AbstractCard {
-            visible: root.statusState.kind === "missing"
-            Layout.fillWidth: true
-
-            contentItem: ColumnLayout {
-                spacing: Kirigami.Units.smallSpacing
-
-                PlasmaExtras.Heading {
-                    level: 5
-                    text: "Esperando datos"
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: "No se encontró ~/.cache/ai-usage-status/status.json"
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    opacity: 0.7
-                    font: Kirigami.Theme.smallFont
-                    text: root.collectorLaunchFailed
-                        ? "No se pudo iniciar el colector. Instala Node.js 18 o posterior."
-                        : "La primera lectura se generará automáticamente."
-                }
-            }
-        }
-
-        // Invalid status.json
-        Kirigami.AbstractCard {
-            visible: root.statusState.kind === "invalid"
-            Layout.fillWidth: true
-
-            contentItem: QQC2.Label {
-                wrapMode: Text.Wrap
-                text: "status.json existe pero no es válido."
-            }
-        }
-
-        // Loaded status
-        ColumnLayout {
-            id: loadedColumn
-            visible: root.statusState.kind === "loaded"
-            Layout.fillWidth: true
-            spacing: Kirigami.Units.largeSpacing
-
-            ProviderCard {
-                Layout.fillWidth: true
-                visible: !!root.codex
-                title: "Codex"
-                iconSource: root.iconSource("codex")
-                provider: root.codex
-                nowMs: root.nowMs
-
-                MetricRow {
-                    visible: !!root.codex && !!root.codex.five_hour
-                    Layout.fillWidth: true
-                    label: "5 horas"
-                    metric: root.codex ? root.codex.five_hour : null
-                    thresholds: root.thresholds
-                    nowMs: root.nowMs
-                }
-                MetricRow {
-                    visible: !!root.codex && !!root.codex.weekly
-                    Layout.fillWidth: true
-                    label: "Semanal"
-                    metric: root.codex ? root.codex.weekly : null
-                    thresholds: root.thresholds
-                    nowMs: root.nowMs
+                Layout.margins: Kirigami.Units.largeSpacing
+                spacing: Kirigami.Units.largeSpacing
+                Kirigami.Icon {
+                    source: root.iconSource("ai")
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
                 }
                 ColumnLayout {
-                    visible: root.codexCreditsVisible
                     Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-
-                    Kirigami.Separator { Layout.fillWidth: true }
-
-                    RowLayout {
+                    spacing: 2
+                    PlasmaExtras.Heading { level: 3; text: "AI Usage"; color: popupColors.text }
+                    QQC2.Label {
                         Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing
-                        QQC2.Label {
-                            text: "Créditos"
-                            font.weight: Font.DemiBold
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            horizontalAlignment: Text.AlignRight
-                            wrapMode: Text.Wrap
-                            font: Kirigami.Theme.defaultFont
-                            color: Format.codexHasCredits(root.codex) ? Format.COLOR_NORMAL : Format.COLOR_MUTED
-                            text: !root.codex ? ""
-                                : root.codex.credits ? Format.codexCreditsLine(root.codex.credits)
-                                : Format.codexCreditsLine({ balance: root.codex.credits_remaining })
-                        }
-                    }
-                    Text {
-                        visible: !!root.codex && !!root.codex.reset_credits
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
+                        elide: Text.ElideRight
+                        color: popupColors.secondary
                         font: Kirigami.Theme.smallFont
-                        color: Format.RESET_LABEL_COLOR
-                        text: root.codex && root.codex.reset_credits
-                            ? Format.resetCreditsLine(root.codex.reset_credits) : ""
+                        text: root.isLoading ? (root.accountNotice || "Actualizando tus cuentas…")
+                            : root.accounts.length + (root.accounts.length === 1 ? " cuenta" : " cuentas")
+                                + " · " + (root.status ? Format.updatedAtLine(root.status, root.nowMs) : "Esperando datos")
                     }
                 }
-            }
-
-            ProviderCard {
-                Layout.fillWidth: true
-                visible: !!root.claude
-                title: "Claude"
-                iconSource: root.iconSource("claude")
-                provider: root.claude
-                nowMs: root.nowMs
-
-                MetricRow {
-                    visible: !!root.claude && !!root.claude.session
-                    Layout.fillWidth: true
-                    label: "Sesión"
-                    metric: root.claude ? root.claude.session : null
-                    thresholds: root.thresholds
-                    nowMs: root.nowMs
-                }
-                MetricRow {
-                    visible: !!root.claude && !!root.claude.weekly
-                    Layout.fillWidth: true
-                    label: "Semanal"
-                    metric: root.claude ? root.claude.weekly : null
-                    thresholds: root.thresholds
-                    nowMs: root.nowMs
-                }
-                RowLayout {
-                    visible: !!root.claude && !!root.claude.daily_routines
-                        && root.claude.daily_routines.used !== null
-                        && root.claude.daily_routines.limit !== null
-                    spacing: Kirigami.Units.smallSpacing
-                    QQC2.Label {
-                        text: "Rutinas"
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 4
-                    }
-                    QQC2.Label {
-                        text: root.claude ? Format.routines(root.claude.daily_routines) : "--"
-                    }
-                }
-                MetricRow {
-                    visible: !!root.claude && !!root.claude.routines
-                    Layout.fillWidth: true
-                    label: "Rutinas"
-                    metric: root.claude ? root.claude.routines : null
-                    thresholds: root.thresholds
-                    nowMs: root.nowMs
-                }
-                QQC2.Label {
-                    readonly property string breakdown: root.claude
-                        ? Format.breakdownLine(root.claude.weekly_breakdown) : ""
-                    visible: breakdown.length > 0
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    opacity: 0.7
-                    font: Kirigami.Theme.smallFont
-                    text: breakdown
-                }
-                ColumnLayout {
-                    id: claudeCredits
-                    visible: !!root.claudeBilling
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-
-                    // The headline is the money that can be spent; the
-                    // bar is the monthly spending *limit*, which is a cap
-                    // and not money.
-                    readonly property color availableColor: Format.severityColor(
-                        Format.availableSeverity(root.claudeBilling))
-                    readonly property color limitColor: Format.severityColor(
-                        Format.billingSeverity(root.claudeBilling, root.thresholds))
-
-                    Kirigami.Separator { Layout.fillWidth: true }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing
-                        QQC2.Label {
-                            text: "Créditos"
-                            font.weight: Font.DemiBold
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            horizontalAlignment: Text.AlignRight
-                            wrapMode: Text.Wrap
-                            font: Kirigami.Theme.defaultFont
-                            color: claudeCredits.availableColor
-                            text: root.claudeBilling ? Format.billingAvailableLine(root.claudeBilling) : ""
-                        }
-                    }
-                    Text {
-                        visible: !!root.claudeBilling && root.claudeBilling.limit !== null
-                            && root.claudeBilling.limit !== undefined
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        font: Kirigami.Theme.smallFont
-                        color: root.claudeBilling && root.claudeBilling.limit_reached
-                            ? Format.COLOR_CRITICAL : Format.COLOR_MUTED
-                        text: !root.claudeBilling ? ""
-                            : root.claudeBilling.limit_reached
-                                ? "Alcanzado · " + Format.billingSpentLine(root.claudeBilling)
-                                : Format.billingSpentLine(root.claudeBilling)
-                    }
-                    UsageBar {
-                        visible: !!root.claudeBilling && root.claudeBilling.percent !== null
-                            && root.claudeBilling.percent !== undefined
-                        value: root.claudeBilling ? Number(root.claudeBilling.percent) : 0
-                        color: claudeCredits.limitColor
-                    }
-                }
-            }
-
-            // Error card
-            Kirigami.AbstractCard {
-                visible: root.hasActiveErrors
-                Layout.fillWidth: true
-
-                contentItem: ColumnLayout {
-                    spacing: Kirigami.Units.smallSpacing
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing
-
-                        Kirigami.Icon {
-                            source: "data-warning"
-                            Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                            Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-                        }
-                        PlasmaExtras.Heading {
-                            level: 5
-                            text: "Actualización incompleta"
-                        }
-                    }
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: root.failedProvidersLabel()
-                            + " Los datos válidos de los demás servicios se conservaron."
-                    }
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        font: Kirigami.Theme.smallFont
-                        opacity: 0.7
-                        text: "Detalles: ~/.cache/ai-usage-status/errors.log"
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing
-                        QQC2.Button {
-                            Layout.fillWidth: true
-                            icon.name: "documentinfo"
-                            text: "Ver detalles"
-                            onClicked: root.openErrorLog()
-                        }
-                        QQC2.Button {
-                            Layout.fillWidth: true
-                            icon.name: "view-refresh"
-                            text: "Reintentar"
-                            enabled: !root.isLoading
-                            onClicked: root.runCollector()
-                        }
-                    }
-                    QQC2.Button {
-                        Layout.alignment: Qt.AlignHCenter
-                        flat: true
-                        text: "Descartar aviso"
-                        enabled: !root.isLoading
-                        onClicked: root.clearErrors()
-                    }
-                }
-            }
-        }
-
-        // Actions card
-        Kirigami.AbstractCard {
-            Layout.fillWidth: true
-
-            contentItem: ColumnLayout {
-                spacing: Kirigami.Units.smallSpacing
-
-                PlasmaExtras.Heading {
-                    level: 5
-                    text: "Acciones"
-                }
-                Kirigami.Separator { Layout.fillWidth: true }
-                QQC2.Button {
-                    visible: !root.hasActiveErrors
-                    Layout.fillWidth: true
+                QQC2.ToolButton {
                     icon.name: "view-refresh"
-                    text: root.isLoading ? "Actualizando…" : "Actualizar ahora"
                     enabled: !root.isLoading
-                    highlighted: true
+                    Accessible.name: "Actualizar todas las cuentas"
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.text: Accessible.name
                     onClicked: root.runCollector()
                 }
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
+                QQC2.ToolButton {
+                    icon.name: "configure"
+                    Accessible.name: "Diseño y tamaño"
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.text: Accessible.name
+                    onClicked: layoutDialog.open()
+                }
+                QQC2.ToolButton {
+                    icon.name: "list-add-user"
+                    enabled: !root.isLoading
+                    Accessible.name: "Añadir cuenta"
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.text: Accessible.name
+                    onClicked: addDialog.open()
+                }
+            }
 
-                    QQC2.Button {
+            QQC2.ProgressBar {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 2
+                indeterminate: root.isLoading
+                visible: root.isLoading
+            }
+            Kirigami.Separator { Layout.fillWidth: true }
+
+            QQC2.ScrollView {
+                id: scrollView
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                contentWidth: availableWidth
+                clip: true
+                QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
+
+                ColumnLayout {
+                    id: contentColumn
+                    width: scrollView.availableWidth
+                    spacing: Kirigami.Units.largeSpacing
+
+                    Kirigami.InlineMessage {
                         Layout.fillWidth: true
-                        icon.source: root.iconSource("codex")
-                        text: root.sessionActive("codex") ? "Ir a Codex" : "Configurar Codex"
-                        onClicked: root.providerAction("codex", root.codexUsageUrl)
+                        Layout.margins: Kirigami.Units.largeSpacing
+                        visible: root.accountError.length > 0
+                        text: root.accountError
+                        type: Kirigami.MessageType.Error
+                        showCloseButton: true
+                        onVisibleChanged: if (!visible) root.accountError = ""
                     }
-                    QQC2.Button {
+
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        icon.source: root.iconSource("claude")
-                        text: root.sessionActive("claude") ? "Ir a Claude" : "Configurar Claude"
-                        onClicked: root.providerAction("claude", root.claudeUsageUrl)
+                        Layout.margins: Kirigami.Units.largeSpacing
+                        visible: root.accounts.length === 0
+                        spacing: Kirigami.Units.largeSpacing
+                        Kirigami.Icon {
+                            source: root.statusState.kind === "invalid" ? "data-warning" : "system-users"
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: 48
+                            Layout.preferredHeight: 48
+                            color: popupColors.secondary
+                        }
+                        PlasmaExtras.Heading {
+                            Layout.alignment: Qt.AlignHCenter
+                            level: 4
+                            text: root.statusState.kind === "invalid" ? "No se pudieron leer los datos"
+                                : root.isLoading ? "Buscando tus cuentas…" : "Todas tus cuentas, en un lugar"
+                        }
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.Wrap
+                            color: popupColors.secondary
+                            text: root.collectorLaunchFailed ? "No se pudo iniciar el colector. Comprueba que Node.js 18 o posterior esté instalado."
+                                : "Conecta tus cuentas de Codex, Claude o Antigravity para ver su uso."
+                        }
+                        QQC2.Button {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Añadir cuenta"
+                            icon.name: "list-add"
+                            highlighted: true
+                            enabled: !root.isLoading
+                            onClicked: addDialog.open()
+                        }
                     }
+
+                    GridLayout {
+                        id: agentGrid
+                        Layout.fillWidth: true
+                        Layout.margins: fullRoot.outerPadding
+                        columns: fullRoot.arrangement.columns
+                        columnSpacing: fullRoot.laneGap
+                        rowSpacing: fullRoot.laneGap
+
+                        Repeater {
+                            model: fullRoot.arrangement.lanes
+                            delegate: ColumnLayout {
+                                id: lane
+                                required property var modelData
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
+                                Layout.preferredWidth: (scrollView.availableWidth - 2 * fullRoot.outerPadding
+                                    - (agentGrid.columns - 1) * fullRoot.laneGap) / agentGrid.columns
+                                spacing: Kirigami.Units.largeSpacing
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Kirigami.Units.smallSpacing * 2
+                                    Kirigami.Icon {
+                                        source: root.iconSource(lane.modelData.provider)
+                                        Layout.preferredWidth: 22
+                                        Layout.preferredHeight: 22
+                                    }
+                                    PlasmaExtras.Heading {
+                                        Layout.fillWidth: true
+                                        level: 4
+                                        color: popupColors.text
+                                        text: lane.modelData.name
+                                    }
+                                    QQC2.Label {
+                                        text: lane.modelData.parts > 1
+                                            ? lane.modelData.part + "/" + lane.modelData.parts
+                                            : lane.modelData.total + (lane.modelData.total === 1 ? " cuenta" : " cuentas")
+                                        color: popupColors.secondary
+                                        font: Kirigami.Theme.smallFont
+                                    }
+                                }
+
+                                Repeater {
+                                    model: lane.modelData.accounts
+                                    delegate: AccountCard {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        account: modelData
+                                        thresholds: root.thresholds
+                                        nowMs: root.nowMs
+                                        pinned: root.isPinned(modelData)
+                                        busy: root.isLoading
+                                        iconSource: root.iconSource(modelData.provider)
+                                        onPinRequested: root.togglePin(modelData)
+                                        onLoginRequested: root.connectAccount(modelData)
+                                        onLogoutRequested: root.manageAccount(["logout", modelData.id], "Cerrando sesión…")
+                                        onRemoveRequested: root.manageAccount(["remove", modelData.id], "Eliminando cuenta…")
+                                        onRenameRequested: {
+                                            renameDialog.accountId = modelData.id;
+                                            renameField.text = modelData.label;
+                                            renameDialog.open();
+                                        }
+                                        onOpenRequested: root.openLink(modelData.provider === "codex" ? root.codexUsageUrl
+                                            : modelData.provider === "claude" ? root.claudeUsageUrl : root.antigravityUsageUrl)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Kirigami.InlineMessage {
+                        visible: root.hasActiveErrors
+                        Layout.fillWidth: true
+                        Layout.margins: Kirigami.Units.largeSpacing
+                        type: Kirigami.MessageType.Warning
+                        text: "Algunas cuentas no pudieron actualizarse. Se conservaron los últimos datos disponibles."
+                        actions: [
+                            Kirigami.Action { text: "Ver detalles"; onTriggered: root.openErrorLog() },
+                            Kirigami.Action { text: "Reintentar"; enabled: !root.isLoading; onTriggered: root.runCollector() },
+                            Kirigami.Action { text: "Descartar"; enabled: !root.isLoading; onTriggered: root.clearErrors() }
+                        ]
+                    }
+                    Item { Layout.preferredHeight: Kirigami.Units.smallSpacing }
+                }
+            }
+
+            Kirigami.Separator { Layout.fillWidth: true }
+            RowLayout {
+                id: footer
+                Layout.fillWidth: true
+                Layout.margins: Kirigami.Units.largeSpacing
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font: Kirigami.Theme.smallFont
+                    color: popupColors.secondary
+                    text: "Fija las cuentas que quieres ver en la barra."
                 }
                 QQC2.Button {
-                    visible: root.errorLogHasEntries && !root.hasActiveErrors
-                    Layout.fillWidth: true
-                    flat: true
-                    text: "Ver historial de errores"
-                    onClicked: root.openErrorLog()
+                    text: "Añadir cuenta"
+                    icon.name: "list-add"
+                    enabled: !root.isLoading
+                    onClicked: addDialog.open()
+                }
+            }
+
+            QQC2.Dialog {
+                id: layoutDialog
+                anchors.centerIn: parent
+                width: Math.min(fullRoot.width - 24, Kirigami.Units.gridUnit * 27)
+                padding: Kirigami.Units.gridUnit
+                title: "Diseño y tamaño"
+                modal: true
+                standardButtons: QQC2.Dialog.Ok | QQC2.Dialog.Cancel
+                onOpened: {
+                    popupSettings.columnCount = Plasmoid.configuration.popupColumns;
+                    popupSettings.rowCount = Plasmoid.configuration.popupRows;
+                    popupSettings.autoWidth = Plasmoid.configuration.popupAutoWidth;
+                    popupSettings.autoHeight = Plasmoid.configuration.popupAutoHeight;
+                    popupSettings.widthPixels = Plasmoid.configuration.popupWidth;
+                    popupSettings.heightPixels = Plasmoid.configuration.popupHeight;
+                    standardButton(QQC2.Dialog.Ok).text = "Aplicar";
+                    standardButton(QQC2.Dialog.Cancel).text = "Cancelar";
+                }
+                onAccepted: {
+                    Plasmoid.configuration.popupColumns = popupSettings.columnCount;
+                    Plasmoid.configuration.popupRows = popupSettings.rowCount;
+                    Plasmoid.configuration.popupAutoWidth = popupSettings.autoWidth;
+                    Plasmoid.configuration.popupAutoHeight = popupSettings.autoHeight;
+                    Plasmoid.configuration.popupWidth = popupSettings.widthPixels;
+                    Plasmoid.configuration.popupHeight = popupSettings.heightPixels;
+                    Plasmoid.configuration.writeConfig();
+                }
+                contentItem: QQC2.ScrollView {
+                    id: layoutScroll
+                    implicitHeight: Math.min(popupSettings.implicitHeight,
+                        fullRoot.arrangement.maxHeight - 140)
+                    contentWidth: availableWidth
+                    clip: true
+                    QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
+                    PopupSettings { id: popupSettings; width: layoutScroll.availableWidth }
+                }
+            }
+
+            QQC2.Dialog {
+                id: addDialog
+                anchors.centerIn: parent
+                width: Math.min(fullRoot.width - 24, Kirigami.Units.gridUnit * 23)
+                padding: Kirigami.Units.gridUnit
+                title: "Añadir cuenta"
+                modal: true
+                standardButtons: QQC2.Dialog.Ok | QQC2.Dialog.Cancel
+                footer: QQC2.DialogButtonBox {
+                    padding: addDialog.padding
+                }
+                onOpened: {
+                    accountName.text = "";
+                    accountName.forceActiveFocus();
+                    standardButton(QQC2.Dialog.Ok).text = "Añadir";
+                    standardButton(QQC2.Dialog.Cancel).text = "Cancelar";
+                }
+                onAccepted: {
+                    var args = ["add", providerCombo.currentValue, accountName.text.trim(),
+                        providerCombo.currentValue === "antigravity" ? "--local"
+                            : connectionCombo.currentIndex === 0 ? "--login" : "--import"];
+                    if (providerCombo.currentValue === "antigravity" && googleEmail.text.trim())
+                        args.push("--email", googleEmail.text.trim());
+                    root.manageAccount(args, providerCombo.currentValue === "antigravity" ? "Conectando con Antigravity…"
+                        : connectionCombo.currentIndex === 0 ? "Completa el inicio de sesión en la ventana abierta…" : "Importando sesión…");
+                }
+                Component.onCompleted: standardButton(QQC2.Dialog.Ok).enabled = Qt.binding(function () {
+                    return accountName.text.trim().length > 0;
+                })
+                contentItem: QQC2.ScrollView {
+                    id: addScroll
+                    implicitHeight: Math.min(addForm.implicitHeight, fullRoot.arrangement.maxHeight - 140)
+                    contentWidth: availableWidth
+                    clip: true
+                    QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
+                    ColumnLayout {
+                        id: addForm
+                        width: addScroll.availableWidth
+                        spacing: Kirigami.Units.largeSpacing
+                        QQC2.Label { text: "Proveedor" }
+                        QQC2.ComboBox {
+                            id: providerCombo
+                            Layout.fillWidth: true
+                            textRole: "text"
+                            valueRole: "value"
+                            model: [{ text: "Claude", value: "claude" }, { text: "Codex", value: "codex" },
+                                { text: "Google Antigravity", value: "antigravity" }]
+                        }
+                        QQC2.Label { text: "Nombre de la cuenta" }
+                        QQC2.TextField {
+                            id: accountName
+                            Layout.fillWidth: true
+                            placeholderText: "Personal, trabajo…"
+                            maximumLength: 60
+                        }
+                        QQC2.Label { text: "Conexión"; visible: providerCombo.currentValue !== "antigravity" }
+                        QQC2.Label {
+                            text: "Correo de Google (opcional)"
+                            visible: providerCombo.currentValue === "antigravity"
+                        }
+                        QQC2.TextField {
+                            id: googleEmail
+                            Layout.fillWidth: true
+                            visible: providerCombo.currentValue === "antigravity"
+                            placeholderText: "Para elegir entre varias sesiones abiertas"
+                            inputMethodHints: Qt.ImhEmailCharactersOnly
+                        }
+                        QQC2.ComboBox {
+                            id: connectionCombo
+                            visible: providerCombo.currentValue !== "antigravity"
+                            Layout.fillWidth: true
+                            model: ["Iniciar otra sesión", "Importar la sesión actual de la CLI"]
+                        }
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            color: popupColors.secondary
+                            font: Kirigami.Theme.smallFont
+                            text: providerCombo.currentValue === "antigravity"
+                                ? "Abre Antigravity e inicia sesión con Google. Se conectará la cuenta activa y se mostrarán sus cuotas por modelo. Antigravity debe permanecer abierto para actualizar."
+                                : connectionCombo.currentIndex === 0
+                                ? "Se abrirá una terminal para iniciar sesión. Elige la cuenta que quieres añadir en el navegador."
+                                : "Se guardará una copia independiente de la sesión actual. Asigna un nombre para reconocerla."
+                        }
+                    }
+                }
+            }
+
+            QQC2.Dialog {
+                id: renameDialog
+                property string accountId: ""
+                anchors.centerIn: parent
+                width: Math.min(fullRoot.width - 24, Kirigami.Units.gridUnit * 20)
+                title: "Cambiar nombre"
+                modal: true
+                standardButtons: QQC2.Dialog.Ok | QQC2.Dialog.Cancel
+                onAccepted: root.manageAccount(["rename", accountId, renameField.text.trim()])
+                onOpened: {
+                    renameField.forceActiveFocus();
+                    renameField.selectAll();
+                    standardButton(QQC2.Dialog.Ok).text = "Guardar";
+                    standardButton(QQC2.Dialog.Cancel).text = "Cancelar";
+                }
+                Component.onCompleted: standardButton(QQC2.Dialog.Ok).enabled = Qt.binding(function () {
+                    return renameField.text.trim().length > 0;
+                })
+                QQC2.TextField {
+                    id: renameField
+                    width: parent.width
+                    maximumLength: 60
+                    placeholderText: "Nombre de la cuenta"
                 }
             }
         }

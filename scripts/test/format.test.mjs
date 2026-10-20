@@ -50,6 +50,17 @@ function status(overrides = {}) {
 const labels = (options, state = status()) =>
   Array.from(Format.panelEntries(state, options, NOW), (entry) => entry.label);
 
+test('account emails appear in the full tooltip and signed-out identities stay hidden', () => {
+  const state = status();
+  state.data.codex.account_email = 'personal@example.test';
+  state.data.claude.account_email = 'work@example.test';
+  assert.match(Format.tooltipText(state, NOW), /personal@example\.test/);
+  assert.match(Format.tooltipText(state, NOW), /work@example\.test/);
+  state.data.claude.logged_out = true;
+  assert.doesNotMatch(Format.tooltipText(state, NOW), /work@example\.test/);
+  assert.equal(Format.accountEmail({}), '');
+});
+
 test('default panel keeps the previous "% usado" look', () => {
   assert.deepEqual(labels({}), ['3%', '0%']);
 });
@@ -209,4 +220,76 @@ test('vertical panels stack every part on its own line', () => {
     Array.from(withClock.lines, (line) => Array.from(line, (s) => s.text).join('')),
     ['3%', '3h56', '17:24', 'S 51%'],
   );
+});
+
+function multiAccountStatus() {
+  const state = status();
+  state.data.accounts = [
+    { ...state.data.codex, id: 'codex-personal', provider: 'codex', label: 'Personal' },
+    { ...state.data.claude, id: 'claude-personal', provider: 'claude', label: 'Personal' },
+    { ...state.data.claude, id: 'claude-work', provider: 'claude', label: 'Trabajo',
+      session: { used_percent: 42, reset_epoch: NOW_S + 3600 } },
+  ];
+  return state;
+}
+
+test('panel selection filters individual accounts while the popup model and tooltip retain every account', () => {
+  const state = multiAccountStatus();
+  const options = { hiddenAccountIds: ['claude-personal'] };
+  const entries = Format.panelEntries(state, options, NOW);
+  assert.deepEqual(Array.from(entries, (entry) => entry.accountId), ['codex-personal', 'claude-work']);
+  assert.equal(entries[1].accountLabel, 'Trabajo');
+  assert.equal(entries[1].showAccountName, true);
+  assert.equal(Format.accountsOf(state.data).length, 3);
+  assert.match(Format.tooltipText(state, NOW), /Claude · Personal/);
+  assert.match(Format.tooltipText(state, NOW), /Claude · Trabajo/);
+});
+
+test('all accounts can be hidden and an AI icon remains to open the popup', () => {
+  const state = multiAccountStatus();
+  const entries = Format.panelEntries(state, {
+    hiddenAccountIds: state.data.accounts.map((a) => a.id),
+  }, NOW);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].icon, 'ai');
+  assert.equal(entries[0].label, '');
+  assert.equal(Format.accountsOf(state.data).length, 3);
+});
+
+test('disconnected accounts remain in the popup and disappear from the panel', () => {
+  const state = multiAccountStatus();
+  state.data.accounts[1].logged_out = true;
+  state.data.accounts[1].error_code = 'logged_out';
+  state.data.accounts[1].ok = false;
+  const entries = Format.panelEntries(state, {}, NOW);
+  assert.deepEqual(Array.from(entries, (entry) => entry.accountId), ['codex-personal', 'claude-work']);
+  assert.match(Format.tooltipText(state, NOW), /Sesión cerrada/);
+});
+
+test('one failing account does not mark the other accounts stale', () => {
+  const state = multiAccountStatus();
+  state.data.stale = true;
+  state.data.errors = [{ account_id: 'claude-work', code: 'network_error' }];
+  const entries = Format.panelEntries(state, {}, NOW);
+  assert.equal(entries[0].label, '3%');
+  assert.equal(entries[2].label, '42%!');
+});
+
+test('Antigravity panel uses its most constrained quota and the tooltip retains every quota window', () => {
+  const state = multiAccountStatus();
+  state.data.accounts.push({
+    id: 'google', provider: 'antigravity', label: 'Google', ok: true,
+    source: 'antigravity-local', updated_at: new Date(NOW).toISOString(),
+    quota: { used_percent: 75, remaining_percent: 25 },
+    quota_windows: [
+      { label: 'Gemini · Sesión', metric: { used_percent: 25 } },
+      { label: 'Gemini · Semanal', metric: { used_percent: 75 } },
+    ],
+  });
+  const entries = Format.panelEntries(state, {}, NOW);
+  assert.equal(entries[3].label, '75%');
+  assert.equal(entries[3].icon, 'antigravity');
+  assert.match(Format.tooltipText(state, NOW), /Gemini · Sesión: 25%/);
+  assert.match(Format.tooltipText(state, NOW), /Gemini · Semanal: 75%/);
+  assert.equal(Format.panelEntries(state, { showAntigravity: false }, NOW).length, 3);
 });

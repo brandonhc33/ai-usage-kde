@@ -7,13 +7,13 @@
 // decoration, so the binding is put back whenever something overwrites it.
 import QtQuick
 
-import "../code/format.js" as Format
-
 Text {
     id: label
 
     property string severity: ""
-    readonly property color severityColor: Format.severityColor(severity)
+    readonly property color severityColor: colors.forSeverity(severity)
+
+    readonly property QtObject textColors: ContrastPalette { id: colors }
 
     color: severityColor
 

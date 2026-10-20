@@ -20,44 +20,56 @@ ColumnLayout {
     readonly property bool idle: Format.isIdle(metric)
     readonly property real usedPercent: metric && metric.used_percent !== null
         && metric.used_percent !== undefined ? Number(metric.used_percent) : 0
-    readonly property color severityColor: Format.severityColor(
-        Format.metricSeverity(metric, thresholds))
+    readonly property string severity: Format.metricSeverity(metric, thresholds)
+    readonly property color severityColor: colors.forSeverity(severity)
     readonly property string resetText: Format.resetLine(metric, nowMs)
 
+    readonly property QtObject metricColors: ContrastPalette { id: colors }
+
     spacing: Kirigami.Units.smallSpacing
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        text: root.label
+        wrapMode: Text.Wrap
+        font: Kirigami.Theme.smallFont
+        color: colors.secondary
+    }
 
     RowLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        QQC2.Label {
-            text: root.label
-            font.weight: Font.DemiBold
-        }
-
         // Qt Quick Controls can replace a Label's palette when the plasmoid
         // becomes active. Plain Text keeps this semantic color binding intact.
-        Text {
-            text: Format.usageSummary(root.metric)
-            color: root.severityColor
-            font: Kirigami.Theme.defaultFont
+        SeverityText {
+            text: root.idle ? "Sin iniciar" : Format.percent(root.metric ? root.metric.used_percent : null)
+            severity: root.severity
+            font.pointSize: Kirigami.Theme.defaultFont.pointSize + 6
+            font.weight: Font.DemiBold
             Layout.fillWidth: true
-            horizontalAlignment: Text.AlignRight
+            horizontalAlignment: Text.AlignLeft
             verticalAlignment: Text.AlignVCenter
         }
+    }
+
+    QQC2.Label {
+        text: root.idle ? "100% disponible" : Format.percent(Format.remainingPercent(root.metric)) + " disponible"
+        font: Kirigami.Theme.smallFont
+        color: colors.secondary
     }
 
     UsageBar {
         value: root.idle ? 0 : root.usedPercent
         color: root.severityColor
+        severity: root.severity
     }
 
     Text {
         visible: root.resetText.length > 0
         text: root.resetText
-        color: root.idle ? Format.COLOR_MUTED : Format.RESET_LABEL_COLOR
+        color: colors.secondary
         font: Kirigami.Theme.smallFont
-        opacity: 0.85
         Layout.fillWidth: true
         wrapMode: Text.Wrap
     }

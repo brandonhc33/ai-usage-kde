@@ -7,4 +7,9 @@ ConfigModel {
         icon: "preferences-desktop-display"
         source: "ConfigPanel.qml"
     }
+    ConfigCategory {
+        name: "Ventana"
+        icon: "view-grid"
+        source: "ConfigPopup.qml"
+    }
 }

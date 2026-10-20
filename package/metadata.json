@@ -8,15 +8,15 @@
         ],
         "Category": "System Information",
         "BugReportUrl": "https://github.com/brandonhc33/ai-usage-kde/issues",
-        "Description": "Monitor Codex and Claude usage limits from the KDE Plasma panel",
-        "Description[es]": "Monitorea los límites de uso de Codex y Claude desde el panel de KDE Plasma",
+        "Description": "Monitor Codex, Claude and Google Antigravity accounts from the KDE Plasma panel",
+        "Description[es]": "Monitorea cuentas de Codex, Claude y Google Antigravity desde el panel de KDE Plasma",
         "EnabledByDefault": true,
         "Icon": "ai-orb.svg",
         "Id": "com.github.brandonhc33.ai-usage-kde",
         "License": "MIT",
         "Name": "AI Usage",
         "Name[es]": "AI Usage",
-        "Version": "0.3.0",
+        "Version": "0.5.3",
         "Website": "https://github.com/brandonhc33/ai-usage-kde"
     },
     "X-Plasma-API-Minimum-Version": "6.0"

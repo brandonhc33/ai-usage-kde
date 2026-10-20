@@ -30,12 +30,14 @@ var WEEKDAYS = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
 
 var PROVIDERS = [
     { key: "codex", name: "Codex", shortKey: "five_hour", shortLabel: "5 horas" },
-    { key: "claude", name: "Claude", shortKey: "session", shortLabel: "Sesión" }
+    { key: "claude", name: "Claude", shortKey: "session", shortLabel: "Sesión" },
+    { key: "antigravity", name: "Antigravity", shortKey: "quota", shortLabel: "Mayor uso" }
 ];
 
 var SOURCE_LABELS = {
     "codex-cli": "CLI",
     "claude-oauth": "OAuth",
+    "antigravity-local": "Local",
     "cli": "CLI",
     "oauth": "OAuth",
     "web": "web"
@@ -103,6 +105,9 @@ var DEFAULT_PANEL_OPTIONS = {
     twoLines: false,
     showCodex: true,
     showClaude: true,
+    showAntigravity: true,
+    hiddenAccountIds: [],
+    showAccountNames: true,
     // Vertical panels: every " · " part on its own line.
     stacked: false
 };
@@ -300,6 +305,28 @@ function providerPanelEntry(spec, provider, options, thresholds, stale, nowMs) {
 
 // One panel entry (icon + one or two lines of colored segments) per visible
 // provider. `state` is the object returned by status.js::parseStatusFile.
+function accountsOf(status) {
+    if (!status) return [];
+    if (Array.isArray(status.accounts)) return status.accounts;
+    return PROVIDERS.filter(function (spec) { return !!status[spec.key]; }).map(function (spec) {
+        var account = {};
+        for (var key in status[spec.key]) account[key] = status[spec.key][key];
+        account.id = spec.key + "-default";
+        account.provider = spec.key;
+        account.label = "Principal";
+        return account;
+    });
+}
+
+function accountSpec(account) {
+    return PROVIDERS.filter(function (spec) { return spec.key === account.provider; })[0];
+}
+
+function accountEmail(account) {
+    return account && !account.logged_out && account.enabled !== false
+        && typeof account.account_email === "string" ? account.account_email.trim() : "";
+}
+
 function panelEntries(state, rawOptions, nowMs) {
     if (state.kind === "missing") {
         return [simpleEntry("ai", "--", Severity.MUTED, "AI Usage — ejecuta ai-usage-collect")];
@@ -313,16 +340,28 @@ function panelEntries(state, rawOptions, nowMs) {
     var stale = status.stale || isStaleByAge(status, nowMs);
     var entries = [];
 
-    PROVIDERS.forEach(function (spec) {
-        var provider = status[spec.key];
-        if (!provider) return;
+    var accounts = accountsOf(status);
+    accounts.forEach(function (provider) {
+        var spec = accountSpec(provider);
+        if (!spec || provider.logged_out || provider.enabled === false) return;
         if (spec.key === "codex" && !options.showCodex) return;
         if (spec.key === "claude" && !options.showClaude) return;
-        entries.push(providerPanelEntry(spec, provider, options, status.thresholds, stale, nowMs));
+        if (spec.key === "antigravity" && !options.showAntigravity) return;
+        if (options.hiddenAccountIds.indexOf(provider.id) !== -1) return;
+        var entry = providerPanelEntry(spec, provider, options, status.thresholds,
+            (!Array.isArray(status.accounts) && stale) || provider.stale
+                || (status.errors || []).some(function (error) { return error.account_id === provider.id; })
+                || isStaleByAge({ updated_at: provider.updated_at || status.updated_at, thresholds: status.thresholds }, nowMs), nowMs);
+        entry.accountId = provider.id;
+        entry.accountLabel = provider.label || "Principal";
+        entry.tooltip = spec.name + " · " + entry.accountLabel;
+        var siblings = accounts.filter(function (account) { return account.provider === provider.provider; });
+        entry.showAccountName = options.showAccountNames && siblings.length > 1;
+        entries.push(entry);
     });
 
     if (entries.length === 0) {
-        entries.push(simpleEntry("ai", "--", Severity.MUTED, "AI Usage — sin datos disponibles"));
+        entries.push(simpleEntry("ai", "", Severity.MUTED, "AI Usage — abre para ver tus cuentas"));
     }
     return entries;
 }
@@ -364,15 +403,21 @@ function metricLine(label, metric, nowMs) {
 
 function providerTooltip(spec, provider, nowMs) {
     var lines = [spec.name + (provider.plan_type ? " · " + provider.plan_type : "")];
+    var email = accountEmail(provider);
+    if (email) lines.push("  " + email);
     if (!provider.ok) {
         lines.push("  " + providerErrorMessage(spec.name, provider));
         return lines.join("\n");
     }
 
-    if (hasPercent(provider[spec.shortKey])) {
+    if (Array.isArray(provider.quota_windows)) {
+        provider.quota_windows.forEach(function (window) {
+            lines.push("  " + metricLine(window.label, window.metric, nowMs));
+        });
+    } else if (hasPercent(provider[spec.shortKey])) {
         lines.push("  " + metricLine(spec.shortLabel, provider[spec.shortKey], nowMs));
     }
-    if (hasPercent(provider.weekly)) {
+    if (!provider.quota_windows && hasPercent(provider.weekly)) {
         lines.push("  " + metricLine("Semanal", provider.weekly, nowMs));
     }
     var billing = billingOf(provider);
@@ -393,8 +438,13 @@ function tooltipText(state, nowMs) {
 
     var status = state.data;
     var blocks = [];
-    PROVIDERS.forEach(function (spec) {
-        if (status[spec.key]) blocks.push(providerTooltip(spec, status[spec.key], nowMs));
+    accountsOf(status).forEach(function (account) {
+        var spec = accountSpec(account);
+        if (!spec) return;
+        var namedSpec = {};
+        for (var key in spec) namedSpec[key] = spec[key];
+        namedSpec.name = spec.name + " · " + (account.label || "Principal");
+        blocks.push(providerTooltip(namedSpec, account, nowMs));
     });
     if (blocks.length === 0) return "AI Usage — sin datos disponibles";
     if (status.stale || isStaleByAge(status, nowMs)) blocks.push(updatedAtLine(status, nowMs));
@@ -420,11 +470,22 @@ function providerSubtitle(provider, nowMs) {
     return parts.join(" · ");
 }
 
+function providerName(key) {
+    var spec = PROVIDERS.filter(function (provider) { return provider.key === key; })[0];
+    return spec ? spec.name : key;
+}
+
 // Informational (non-error) notice shown under the provider heading.
 function providerNotice(provider) {
     if (!provider) return "";
+    if (provider.source === "antigravity-local" && provider.stale) {
+        return provider.stale_reason === "account_mismatch"
+            ? "La cuenta activa en Antigravity es distinta. Se conservan los últimos datos de esta cuenta."
+            : "Abre Antigravity para actualizar. Se conservan los últimos datos disponibles.";
+    }
     if (provider.stale_reason === "oauth_expired") {
         var time = formatLocalTime(provider.updated_at);
+        if (provider.managed) return "La sesión expiró: datos de las " + (time || "--") + ". Vuelve a iniciar sesión para actualizar.";
         return "Token de Claude Code expirado: datos de las " + (time || "--")
             + ". Abre Claude Code para actualizar.";
     }
@@ -436,11 +497,22 @@ function providerNotice(provider) {
 
 function providerErrorMessage(name, provider) {
     switch (provider ? provider.error_code : null) {
+    case "logged_out":
+        return "Sesión cerrada. Conecta esta cuenta para volver a ver su uso.";
+    case "account_disabled":
+        return "Cuenta desactivada.";
+    case "app_not_running":
+        return "Abre Antigravity e inicia sesión con Google para consultar su uso.";
+    case "account_mismatch":
+        return "Abre en Antigravity la cuenta vinculada a esta tarjeta.";
+    case "quota_unavailable":
+        return "Antigravity todavía no informó sus cuotas. Actualiza la aplicación y vuelve a intentar.";
     case "login_required":
     case "profile_missing":
         return "La sesión de " + name + " venció o todavía no está configurada.";
     case "oauth_expired":
-        return "El token de Claude Code expiró. Abre Claude Code para renovarlo.";
+        return provider.managed ? "La sesión expiró. Vuelve a iniciar sesión para actualizar esta cuenta."
+            : "El token de Claude Code expiró. Abre Claude Code para renovarlo.";
     default:
         return name + " no pudo actualizarse. Reintenta o revisa los detalles del aviso.";
     }
