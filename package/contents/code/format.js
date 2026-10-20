@@ -34,10 +34,17 @@ var PROVIDERS = [
     { key: "antigravity", name: "Antigravity", shortKey: "quota", shortLabel: "Mayor uso" }
 ];
 
+// Kept in sync with scripts/lib (structured-sources.mjs, antigravity.mjs).
+var CLI_INSTALL = {
+    codex: "npm install -g @openai/codex",
+    antigravity: "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+};
+
 var SOURCE_LABELS = {
     "codex-cli": "CLI",
     "claude-oauth": "OAuth",
-    "antigravity-local": "Local",
+    "antigravity-cli": "CLI",
+    "antigravity-local": "App",
     "cli": "CLI",
     "oauth": "OAuth",
     "web": "web"
@@ -478,10 +485,9 @@ function providerName(key) {
 // Informational (non-error) notice shown under the provider heading.
 function providerNotice(provider) {
     if (!provider) return "";
-    if (provider.source === "antigravity-local" && provider.stale) {
-        return provider.stale_reason === "account_mismatch"
-            ? "La cuenta activa en Antigravity es distinta. Se conservan los últimos datos de esta cuenta."
-            : "Abre Antigravity para actualizar. Se conservan los últimos datos disponibles.";
+    if (/^antigravity-/.test(provider.source) && provider.stale) {
+        return providerErrorMessage("Antigravity", { provider: "antigravity", error_code: provider.stale_reason })
+            + " Se conservan los últimos datos de esta cuenta.";
     }
     if (provider.stale_reason === "oauth_expired") {
         var time = formatLocalTime(provider.updated_at);
@@ -501,14 +507,19 @@ function providerErrorMessage(name, provider) {
         return "Sesión cerrada. Conecta esta cuenta para volver a ver su uso.";
     case "account_disabled":
         return "Cuenta desactivada.";
+    case "cli_missing":
+        return provider.provider === "antigravity"
+            ? "Instala el CLI de Antigravity para ver tu cuota sin abrir la app: " + CLI_INSTALL.antigravity
+            : "Instala el CLI de " + name + " para leer el uso sin navegador: " + CLI_INSTALL.codex;
     case "app_not_running":
         return "Abre Antigravity e inicia sesión con Google para consultar su uso.";
     case "account_mismatch":
-        return "Abre en Antigravity la cuenta vinculada a esta tarjeta.";
+        return "El CLI y la app de Antigravity tienen abierta otra cuenta de Google.";
     case "quota_unavailable":
         return "Antigravity todavía no informó sus cuotas. Actualiza la aplicación y vuelve a intentar.";
     case "login_required":
     case "profile_missing":
+        if (provider.provider === "antigravity") return "Inicia sesión en el CLI de Antigravity: ejecuta agy en una terminal.";
         return "La sesión de " + name + " venció o todavía no está configurada.";
     case "oauth_expired":
         return provider.managed ? "La sesión expiró. Vuelve a iniciar sesión para actualizar esta cuenta."

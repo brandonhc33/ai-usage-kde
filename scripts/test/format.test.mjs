@@ -293,3 +293,15 @@ test('Antigravity panel uses its most constrained quota and the tooltip retains 
   assert.match(Format.tooltipText(state, NOW), /Gemini · Semanal: 75%/);
   assert.equal(Format.panelEntries(state, { showAntigravity: false }, NOW).length, 3);
 });
+
+test('a missing CLI asks to install it and stale Antigravity data keeps the actionable reason', () => {
+  assert.match(Format.providerErrorMessage('Antigravity', { provider: 'antigravity', error_code: 'cli_missing' }),
+    /curl -fsSL https:\/\/antigravity\.google\/cli\/install\.sh \| bash$/);
+  assert.match(Format.providerErrorMessage('Codex', { provider: 'codex', error_code: 'cli_missing' }),
+    /npm install -g @openai\/codex$/);
+  assert.match(Format.providerErrorMessage('Antigravity', { provider: 'antigravity', error_code: 'login_required' }), /ejecuta agy/);
+  const stale = { provider: 'antigravity', source: 'antigravity-cli', stale: true, stale_reason: 'login_required',
+    updated_at: new Date(NOW).toISOString() };
+  assert.match(Format.providerNotice(stale), /^Inicia sesión en el CLI de Antigravity.*Se conservan los últimos datos/);
+  assert.match(Format.providerSubtitle(stale, NOW), /^CLI · /);
+});

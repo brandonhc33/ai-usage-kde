@@ -791,7 +791,7 @@ PlasmoidItem {
                             color: popupColors.secondary
                             font: Kirigami.Theme.smallFont
                             text: providerCombo.currentValue === "antigravity"
-                                ? "Abre Antigravity e inicia sesión con Google. Se conectará la cuenta activa y se mostrarán sus cuotas por modelo. Antigravity debe permanecer abierto para actualizar."
+                                ? "Se conectará la cuenta de Google con la que iniciaste sesión en el CLI de Antigravity (agy), sin necesidad de abrir la app. Si no tienes el CLI, abre Antigravity: la app debe permanecer abierta para actualizar."
                                 : connectionCombo.currentIndex === 0
                                 ? "Se abrirá una terminal para iniciar sesión. Elige la cuenta que quieres añadir en el navegador."
                                 : "Se guardará una copia independiente de la sesión actual. Asigna un nombre para reconocerla."

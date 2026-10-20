@@ -159,7 +159,8 @@ Kirigami.AbstractCard {
             spacing: Kirigami.Units.largeSpacing
         }
 
-        QQC2.Label {
+        // Selectable: errors may carry a command to copy (e.g. installing a CLI).
+        Kirigami.SelectableLabel {
             visible: card.notice.length > 0 || !card.providerOk
             Layout.fillWidth: true
             wrapMode: Text.Wrap
