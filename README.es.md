@@ -3,7 +3,7 @@
 **Español** | [English](README.md)
 
 AI Usage es un widget de panel de solo lectura que monitorea los límites de
-uso de Codex y Claude. No envía prompts, no consume créditos ni realiza
+uso de Codex, Claude y Google Antigravity. No envía prompts, no consume créditos ni realiza
 solicitudes de IA en nombre del usuario.
 
 El widget prefiere fuentes locales y estructuradas:
@@ -106,7 +106,7 @@ popup para reintentar después de iniciar sesión en Codex o Claude.
 ### Archivo `.plasmoid` local
 
 ```bash
-kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.3.0.plasmoid
+kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.5.3.plasmoid
 ```
 
 Para una actualización, usa `--upgrade` en lugar de `--install`.
@@ -173,16 +173,120 @@ defecto `"on_oauth_expired": "keep_last"` conserva los últimos datos de Claude,
 en gris y con un aviso, en vez de leer claude.ai con el navegador. Usa `"web"`
 para volver al fallback web.
 
+### Cuentas y sesiones
+
+Abre el widget y selecciona **Añadir cuenta**. Elige Codex o Claude, asigna
+un nombre (por ejemplo, «Personal» o «Trabajo») y selecciona cómo conectarla:
+
+- **Iniciar otra sesión:** abre Konsole y el inicio de sesión oficial de la CLI.
+  Elige la cuenta correspondiente en el navegador. Requiere Codex CLI o Claude
+  Code y Konsole (también admite `x-terminal-emulator` o `xterm`).
+- **Importar la sesión actual de la CLI:** guarda una copia de las credenciales
+  locales actuales. La sesión debe estar guardada en archivos; si Codex usa
+  exclusivamente el llavero, utiliza el inicio de sesión nuevo.
+
+Puedes añadir varias cuentas del mismo proveedor. Cada una tiene su propio
+nombre, credenciales y datos de uso en `~/.config/ai-usage-status/accounts/`.
+El menú **⋮** de cada tarjeta permite cambiar el nombre, volver a iniciar
+sesión, **Cerrar sesión** o eliminar la cuenta del widget. Cerrar sesión borra
+las credenciales guardadas por el widget y sus datos en caché; conserva la
+tarjeta para poder reconectarla. Eliminar también quita la tarjeta.
+
+Las cuentas de la configuración anterior siguen apareciendo automáticamente
+como «Principal». Desconectarlas del widget no borra las sesiones de otras
+aplicaciones. Las cuentas añadidas desde el widget usan un directorio propio
+mediante `CODEX_HOME` o `CLAUDE_CONFIG_DIR`. Las credenciales de Claude pueden
+expirar: usa **Iniciar sesión** en la tarjeta para renovarlas.
+
+Usa la **chincheta** de cada tarjeta para elegir qué cuentas aparecen en la
+barra. La selección se guarda por instancia del widget. **Al abrir el
+widget siempre aparecen todas**, incluidas las que hayas ocultado o
+desconectado. Si ocultas todas, queda el icono de AI Usage para abrirlo.
+
+También puedes administrar las cuentas desde la instalación completa:
+
+```bash
+ai-usage-accounts list
+ai-usage-accounts add claude Trabajo --login
+ai-usage-accounts add codex Personal --import
+ai-usage-accounts rename ID 'Trabajo'
+ai-usage-accounts logout ID
+ai-usage-accounts login ID --terminal
+ai-usage-accounts remove ID
+```
+
+La configuración mantiene la compatibilidad con `providers`. Al administrar
+cuentas se guarda una lista `accounts` con identificadores estables. Una lista
+vacía indica que eliminaste todas las cuentas; no vuelve a detectarlas.
+
+### Distribución y tamaño de la ventana
+
+El desplegable agrupa las cuentas en columnas por agente. En modo automático,
+el ancho depende de las columnas y el alto se ajusta al contenido. Si un agente
+tiene muchas cuentas, continúa en otra columna. La ventana se limita al tamaño
+de la pantalla y solo muestra desplazamiento cuando el contenido no cabe.
+
+Abre **Diseño y tamaño** (icono de ajustes junto a actualizar) para elegir:
+
+- Columnas automáticas o un máximo de 1 a 6.
+- Filas automáticas o de 1 a 8 cuentas por columna.
+- Ancho y alto automáticos, configurables de manera independiente.
+- Ancho y alto manuales en píxeles.
+
+Los mismos controles están en clic derecho > **Configurar AI Usage…** >
+**Ventana**. Los cambios se guardan por instancia del widget.
+
+Los colores del texto y del consumo se adaptan al fondo claro u oscuro. Los
+porcentajes, los créditos y los textos informativos mantienen suficiente
+contraste sin recurrir a transparencia; las barras tienen un contorno visible.
+
+### Google Antigravity
+
+Selecciona **Añadir cuenta** > **Google Antigravity**. Abre primero Antigravity
+(la aplicación o el IDE), inicia sesión con Google y deja la aplicación abierta
+para actualizar el consumo. El widget consulta únicamente el servicio local de
+cuotas: no envía prompts ni copia tokens OAuth de Google. El token CSRF local
+se mantiene en memoria y nunca se escribe en la configuración ni en el estado.
+
+La cuenta se vincula a su identidad de Google. Si hay varias sesiones locales,
+puedes escribir el correo para seleccionar la correcta. Cambiar de cuenta en
+Antigravity no cambia la identidad de otra tarjeta; sus últimos datos se
+conservan temporalmente y se avisa de la diferencia. **Desconectar del widget**
+retira sus datos del widget y conserva el inicio de sesión de Antigravity.
+
+Se muestran cuotas de sesión y semanales cuando el servicio las proporciona.
+En versiones del IDE que solo informan cuotas por modelo, se muestran esos
+límites sin inventar su duración. Los valores no informados aparecen como `--`.
+El panel usa el mayor porcentaje de consumo conocido.
+
+Esta integración es experimental porque la API local de Antigravity es interna.
+No es una integración con Gemini CLI ni con la facturación de Gemini API.
+Referencias: [planes de Google Antigravity](https://antigravity.google/docs/plans)
+y [protocolo local documentado por CodexBar](https://github.com/steipete/CodexBar/blob/main/docs/antigravity.md).
+
+```bash
+ai-usage-accounts add antigravity Google --local
+ai-usage-accounts add antigravity Trabajo --local --email nombre@example.com
+```
+
 ### Opciones del widget
 
 Clic derecho en el widget > **Configurar AI Usage…** > **Panel** para elegir
 qué se ve en el panel: % usado o restante, reinicio de sesión, % semanal y
 día del reinicio (opcionalmente en una segunda línea), crédito disponible o una
-plantilla personalizada. El tooltip siempre muestra todas las ventanas,
+plantilla personalizada. También puedes mostrar los nombres cuando hay varias
+cuentas del mismo proveedor. El tooltip siempre muestra todas las ventanas,
 reinicios y créditos.
 
 En los formatos con reinicio, **Mostrar reinicio como** permite elegir tiempo
 restante (`3h56`), hora local (`17:24`) o ambos (`3h56 · 17:24`).
+
+**Texto de la barra > Usar negrita** permite activar o desactivar la negrita
+de nombres, porcentajes y reinicios. Viene activada por defecto.
+
+El correo de la sesión aparece debajo del nombre de cada cuenta cuando está
+disponible. Pasa el cursor sobre él para verlo completo si queda abreviado.
+También aparece en el tooltip de la barra.
 
 ## Privacidad y seguridad
 
@@ -227,7 +331,7 @@ just package-store
 ```
 
 `just package-store` crea en `dist/` el archivo autónomo para KDE Store. El
-archivo contiene `metadata.json` en la raíz e incluye únicamente el colector
-estructurado; no incluye Playwright ni `node_modules`.
+archivo contiene `metadata.json` en la raíz e incluye el colector
+estructurado y el administrador de cuentas; no incluye Playwright ni `node_modules`.
 
 Errores y sugerencias: <https://github.com/brandonhc33/ai-usage-kde/issues>

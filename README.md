@@ -2,8 +2,8 @@
 
 [Español](README.es.md) | **English**
 
-AI Usage is a read-only panel widget that monitors the usage limits of Codex
-and Claude. It does not send prompts, consume credits, or make AI requests on
+AI Usage is a read-only panel widget that monitors the usage limits of Codex,
+Claude and Google Antigravity. It does not send prompts, consume credits, or make AI requests on
 the user's behalf.
 
 The widget prefers local, structured sources:
@@ -105,7 +105,7 @@ retry after signing in to Codex or Claude.
 ### Local `.plasmoid` file
 
 ```bash
-kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.3.0.plasmoid
+kpackagetool6 --type Plasma/Applet --install ai-usage-kde-0.5.3.plasmoid
 ```
 
 For an update, use `--upgrade` instead of `--install`.
@@ -169,15 +169,113 @@ expired (typically before the first Claude Code use of the day), the default
 with a notice, instead of scraping claude.ai. Set it to `"web"` to use the web
 fallback instead.
 
+### Accounts and sessions
+
+Open the widget and select **Añadir cuenta** (Add account). Choose Codex or
+Claude, give the account a name such as Personal or Work, and choose a connection:
+
+- **Iniciar otra sesión** (Sign in): opens a terminal and the official CLI login.
+  Select the intended account in your browser. Requires Codex CLI or Claude Code
+  and Konsole (`x-terminal-emulator` and `xterm` are also supported).
+- **Importar la sesión actual de la CLI** (Import current CLI session): copies
+  the current local file credentials. For Codex sessions stored exclusively in
+  the keyring, use a new sign-in instead.
+
+You can add multiple accounts of the same provider. Each account has its own
+name, credentials and usage snapshot. Widget credentials live under
+`~/.config/ai-usage-status/accounts/`. The **⋮** menu on each card lets you
+rename, reconnect, sign out or remove an account. Signing out deletes the
+widget's saved credentials and cached usage, keeping the card for reconnection.
+Removing an account also removes its card.
+
+Existing provider configurations continue to appear as Principal accounts.
+Disconnecting these from the widget preserves sessions used by other apps.
+New accounts use separate `CODEX_HOME` or `CLAUDE_CONFIG_DIR` directories.
+Claude credentials can expire; use the sign-in action on the account card to
+renew them.
+
+Use each card's **pin** to select which accounts appear in the panel. Selection
+is saved per widget instance. **The expanded view always shows every account**,
+including hidden and signed-out accounts. Hiding everything leaves the AI Usage
+icon available to open the widget.
+
+The full installation also provides account management commands:
+
+```bash
+ai-usage-accounts list
+ai-usage-accounts add claude Work --login
+ai-usage-accounts add codex Personal --import
+ai-usage-accounts rename ID 'Work'
+ai-usage-accounts logout ID
+ai-usage-accounts login ID --terminal
+ai-usage-accounts remove ID
+```
+
+The configuration remains compatible with `providers`. Managing accounts saves
+an explicit `accounts` list with stable IDs. An empty list means all accounts
+were removed and prevents automatic detection from bringing them back.
+
+### Popup layout and sizing
+
+Accounts are grouped into columns by agent. Automatic width follows the number
+of columns, and automatic height follows the content. Large agent groups
+continue in adjacent columns. The popup stays within the screen and only
+scrolls when its content exceeds the available space.
+
+Use **Diseño y tamaño** (the settings icon next to refresh) or right-click >
+**Configure AI Usage…** > **Ventana** to choose automatic or manual columns
+(up to 6), accounts per column (up to 8), and independent automatic or manual
+width and height in pixels. Settings are saved per widget instance.
+
+Text and usage colors adapt to light and dark backgrounds. Percentages,
+credits, and informational labels retain contrast without opacity reductions;
+usage tracks have visible outlines.
+
+### Google Antigravity
+
+Choose **Añadir cuenta** > **Google Antigravity**. Open Antigravity (app or IDE)
+and sign in with Google first. It must remain open to refresh usage. The widget
+only reads the local quota service. It sends no prompts and copies no Google
+OAuth credentials. Local CSRF tokens stay in memory and are never stored in
+configuration or status files.
+
+Each card is bound to the Google identity detected at connection time. If
+multiple accounts are open, enter the account email to select one. Switching
+accounts in Antigravity never substitutes another identity's usage. A mismatch
+keeps the previous snapshot temporarily and displays a notice. Disconnecting
+from the widget preserves the session in Antigravity.
+
+Session and weekly limits are shown when provided. Older IDE responses that
+only expose model quotas retain those quotas without guessing their duration.
+Unknown usage stays unavailable (`--`), and the panel shows the highest known
+usage percentage.
+
+This integration is experimental because Antigravity's local API is internal.
+It does not monitor Gemini CLI or Gemini API billing. References:
+[Google Antigravity plans](https://antigravity.google/docs/plans) and
+[CodexBar's local protocol documentation](https://github.com/steipete/CodexBar/blob/main/docs/antigravity.md).
+
+```bash
+ai-usage-accounts add antigravity Google --local
+ai-usage-accounts add antigravity Work --local --email name@example.com
+```
+
 ### Widget settings
 
 Right-click the widget > **Configure AI Usage…** > **Panel** to choose what
 the panel shows: percent used or left, session reset, the weekly percent
 and reset day (optionally on a second line), available credit, or a custom
-template. The tooltip always lists every window, reset and credit.
+template, and display account names when a provider has multiple accounts.
+The tooltip always lists every account, window, reset and credit.
 
 For reset presets, **Mostrar reinicio como** lets you choose the countdown
 (`3h56`), the local reset time (`17:24`), or both (`3h56 · 17:24`).
+
+**Texto de la barra > Usar negrita** toggles bold panel text, including account
+names, percentages and resets. It is enabled by default.
+
+The session email appears below each account name when available. Hover over
+an abbreviated address to see it in full. Emails also appear in the panel tooltip.
 
 ## Privacy and security
 
@@ -223,6 +321,6 @@ just package-store
 
 `just package-store` creates the self-contained KDE Store upload in `dist/`.
 The archive contains `metadata.json` at its root and bundles only the
-structured collector; Playwright and `node_modules` are not included.
+structured collector and account manager; Playwright and `node_modules` are not included.
 
 Bug reports: <https://github.com/brandonhc33/ai-usage-kde/issues>
