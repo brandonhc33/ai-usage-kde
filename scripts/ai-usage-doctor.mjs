@@ -5,6 +5,8 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveCodexCommand } from './lib/structured-sources.mjs';
+import { expandHome, loadConfig } from './lib/accounts.mjs';
+import { discoverAntigravityServers } from './lib/antigravity.mjs';
 
 const HOME = os.homedir();
 let failures = 0;
@@ -43,31 +45,6 @@ console.log('AI Usage KDE — diagnóstico\n');
 
 result(Number(process.versions.node.split('.')[0]) >= 18, 'Node.js', process.version);
 
-const codex = await resolveCodexCommand({}).catch(() => null);
-result(Boolean(codex), 'Codex CLI', codex ?? 'no encontrado; se usará fallback web', false);
-
-const credentialsFile = path.join(HOME, '.claude', '.credentials.json');
-const credentials = (await readJson(credentialsFile))?.claudeAiOauth;
-const oauthValid = Boolean(
-  credentials?.accessToken
-  && credentials?.scopes?.includes('user:profile')
-  && Number(credentials?.expiresAt) > Date.now(),
-);
-function hoursUntil(epochMs) {
-  const hours = (Number(epochMs) - Date.now()) / 3_600_000;
-  return hours >= 1 ? `${Math.floor(hours)} h` : `${Math.max(0, Math.round(hours * 60))} min`;
-}
-
-const tokenExpired = Boolean(credentials?.accessToken) && Number(credentials?.expiresAt) <= Date.now();
-const oauthDetail = !credentials
-  ? 'no encontrado; se usará fallback web'
-  : oauthValid
-    ? `válido hasta ${new Date(credentials.expiresAt).toLocaleString()} (quedan ${hoursUntil(credentials.expiresAt)})`
-    : tokenExpired
-      ? 'expirado: se conserva el último dato hasta que uses Claude Code (renueva el token)'
-      : 'ausente o sin scope user:profile; se usará fallback web';
-result(oauthValid, 'Claude OAuth', oauthDetail, false);
-
 const browser = findExecutable([
   'google-chrome-stable',
   'google-chrome',
@@ -75,8 +52,32 @@ const browser = findExecutable([
   'chromium-browser',
 ]);
 result(Boolean(browser), 'Chrome/Chromium (fallback)', browser ?? 'no encontrado', false);
-result(Boolean(codex || browser), 'Fuente utilizable para Codex', codex ? 'CLI estructurado' : browser ? 'fallback web' : 'ninguna');
-result(Boolean(oauthValid || browser), 'Fuente utilizable para Claude', oauthValid ? 'OAuth estructurado' : browser ? 'fallback web' : 'ninguna');
+const config = await loadConfig().catch(() => null);
+for (const account of config?.accounts ?? []) {
+  const label = `${account.provider === 'codex' ? 'Codex' : account.provider === 'claude' ? 'Claude' : 'Antigravity'} · ${account.label}`;
+  if (account.logged_out || !account.enabled) {
+    result(true, label, account.logged_out ? 'sesión cerrada' : 'desactivada', false);
+    continue;
+  }
+  if (account.provider === 'antigravity') {
+    const servers = await discoverAntigravityServers();
+    result(servers.length > 0, label, servers.length ? 'servicio local disponible' : 'abre Antigravity e inicia sesión con Google');
+  } else if (account.config.source === 'web') {
+    result(Boolean(browser), label, browser ? 'fallback web' : 'requiere Chrome/Chromium');
+  } else if (account.provider === 'codex') {
+    const command = await resolveCodexCommand(account.config).catch(() => null);
+    const credentials = account.managed
+      ? await readJson(path.join(expandHome(account.config.codex_home), 'auth.json')) : null;
+    const usable = Boolean(command && (!account.managed || credentials?.tokens?.access_token));
+    result(usable, label, usable ? 'CLI estructurado disponible' : 'falta la CLI o una sesión guardada');
+  } else {
+    const credentials = (await readJson(expandHome(account.config.oauth_credentials_file)))?.claudeAiOauth;
+    const valid = Boolean(credentials?.accessToken && credentials?.scopes?.includes('user:profile')
+      && Number(credentials?.expiresAt) > Date.now());
+    result(valid, label, valid ? 'OAuth válido' : account.managed
+      ? 'inicia sesión desde la tarjeta del widget' : 'abre Claude Code para renovar la sesión');
+  }
+}
 
 const xvfb = findExecutable(['Xvfb']);
 result(
@@ -102,7 +103,7 @@ result(
 );
 
 const configFile = path.join(HOME, '.config', 'ai-usage-status', 'config.json');
-result(Boolean(await readJson(configFile)), 'Configuración JSON', configFile);
+result(Boolean(config), 'Configuración JSON', config ? `${configFile} (${config.accounts.length} cuentas)` : 'no válida');
 
 const statusFile = path.join(HOME, '.cache', 'ai-usage-status', 'status.json');
 const status = await readJson(statusFile);

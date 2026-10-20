@@ -1,11 +1,12 @@
 {
   "name": "ai-usage-status-collector",
-  "version": "0.3.0",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "description": "Structured Codex/Claude usage collector with a Playwright fallback for the AI Usage KDE widget",
   "bin": {
     "ai-usage-auth": "./ai-usage-auth.mjs",
+    "ai-usage-accounts": "./ai-usage-accounts.mjs",
     "ai-usage-collect": "./ai-usage-collect.mjs",
     "ai-usage-clear-errors": "./ai-usage-clear-errors.mjs",
     "ai-usage-doctor": "./ai-usage-doctor.mjs"

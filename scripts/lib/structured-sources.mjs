@@ -352,11 +352,18 @@ export async function resolveCodexCommand(config = {}) {
   throw sourceError('No se encontró el CLI de Codex.');
 }
 
-function readCodexAppServer(command, timeoutMs) {
+function readCodexAppServer(command, timeoutMs, config = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, ['app-server'], {
+    const env = { ...process.env };
+    const args = ['app-server'];
+    if (config.codex_home) {
+      env.CODEX_HOME = expandHome(config.codex_home);
+      for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN']) delete env[key];
+      args.push('-c', 'cli_auth_credentials_store="file"');
+    }
+    const child = spawn(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env,
     });
     const lines = readline.createInterface({ input: child.stdout });
     let stderr = '';
@@ -417,7 +424,7 @@ function readCodexAppServer(command, timeoutMs) {
         clientInfo: {
           name: 'ai_usage_kde',
           title: 'AI Usage KDE',
-          version: '0.3.0',
+          version: '0.5.3',
         },
       },
     });
@@ -427,7 +434,7 @@ function readCodexAppServer(command, timeoutMs) {
 export async function fetchCodexCli(config = {}) {
   const command = await resolveCodexCommand(config);
   const timeoutMs = Number(config.cli_timeout_ms) || 15_000;
-  return mapCodexRateLimits(await readCodexAppServer(command, timeoutMs));
+  return mapCodexRateLimits(await readCodexAppServer(command, timeoutMs, config));
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {
@@ -485,7 +492,7 @@ export async function fetchClaudeOAuth(config = {}) {
     root = JSON.parse(await fs.readFile(credentialsPath, 'utf8'));
   } catch (error) {
     if (error.code === 'ENOENT') throw sourceError('No existe ~/.claude/.credentials.json.');
-    throw sourceError(`No pude leer credenciales OAuth de Claude: ${error.message}`);
+    throw sourceError('No pude leer las credenciales OAuth de esta cuenta de Claude.');
   }
 
   const credentials = root?.claudeAiOauth;

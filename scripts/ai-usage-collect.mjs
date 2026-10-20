@@ -14,6 +14,12 @@ import {
   webBackoffUntil,
 } from './lib/provider-state.mjs';
 import { fetchClaudeOAuth, fetchCodexCli } from './lib/structured-sources.mjs';
+import { fetchAntigravityLocal } from './lib/antigravity.mjs';
+import { readAccountEmail } from './lib/account-identity.mjs';
+import {
+  DEFAULT_CONFIG, normalizeConfig, publicAccount, disconnectedAccount, acquireLock, loadConfig,
+  updateLegacyProviders,
+} from './lib/accounts.mjs';
 import { withDisplay } from './lib/xvfb.mjs';
 import {
   CLAUDE_READY,
@@ -33,10 +39,9 @@ const LOCK_FILE = path.join(CACHE_DIR, 'collector.lock');
 const ERROR_LOG_FILE = path.join(CACHE_DIR, 'errors.log');
 const BROWSER_DISPLAY_MODE_FILE = path.join(CACHE_DIR, 'browser-display-mode.json');
 const PROVIDER_STATE_FILE = path.join(CACHE_DIR, 'provider-state.json');
-const LOCK_STALE_MS = 10 * 60 * 1000;
 const GENERIC_FETCH_ERROR = 'No se obtuvo la información.';
-const SCHEMA_VERSION = 2;
-const WINDOW_KEYS = ['five_hour', 'weekly', 'session', 'routines'];
+const SCHEMA_VERSION = 3;
+const WINDOW_KEYS = ['five_hour', 'weekly', 'session', 'routines', 'quota'];
 
 // --force: manual refresh, ignores the web-fallback backoff.
 // --if-older-than <s>: periodic refresh from the widget; does nothing when
@@ -54,44 +59,6 @@ const IF_OLDER_THAN_SECONDS = (() => {
 // Loaded in main(); see lib/provider-state.mjs.
 let providerState = {};
 
-const DEFAULT_CONFIG = {
-  schema_version: 1,
-  primary: { provider: 'codex', metric: 'five_hour' },
-  thresholds: {
-    warning_used_percent: 51,
-    critical_used_percent: 76,
-    stale_after_minutes: 15,
-    last_good_valid_minutes: 30,
-  },
-  providers: {
-    codex: {
-      enabled: true,
-      source: 'auto',
-      cli_path: null,
-      cli_timeout_ms: 15000,
-      url: 'https://chatgpt.com/codex/settings/usage',
-      profile_dir: '~/.config/ai-usage-status/profiles/chatgpt',
-      headless: true,
-      wait_ms: 8000,
-      debug_text: false,
-    },
-    claude: {
-      enabled: true,
-      source: 'auto',
-      oauth_credentials_file: '~/.claude/.credentials.json',
-      oauth_timeout_ms: 30000,
-      // keep_last: an expired Claude Code token keeps the last snapshot
-      // (marked stale) instead of launching Chrome. web: old behavior.
-      on_oauth_expired: 'keep_last',
-      url: 'https://claude.ai/new#settings/usage',
-      profile_dir: '~/.config/ai-usage-status/profiles/claude',
-      headless: true,
-      wait_ms: 8000,
-      debug_text: false,
-    },
-  },
-};
-
 function expandHome(value) {
   return value?.replace(/^~(?=$|\/)/, HOME);
 }
@@ -102,20 +69,6 @@ async function readJson(file, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function normalizeConfig(value) {
-  const config = value && typeof value === 'object' ? value : {};
-  return {
-    ...DEFAULT_CONFIG,
-    ...config,
-    primary: { ...DEFAULT_CONFIG.primary, ...config.primary },
-    thresholds: { ...DEFAULT_CONFIG.thresholds, ...config.thresholds },
-    providers: {
-      codex: { ...DEFAULT_CONFIG.providers.codex, ...config.providers?.codex },
-      claude: { ...DEFAULT_CONFIG.providers.claude, ...config.providers?.claude },
-    },
-  };
 }
 
 async function ensureDefaultConfig() {
@@ -177,54 +130,16 @@ async function reportFailure(provider, error, extra = {}) {
   }
 }
 
-function processExists(pid) {
-  if (!pid) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-}
-
-function lockIsActive(lock) {
-  const startedAt = Date.parse(lock?.started_at);
-  if (!Number.isFinite(startedAt)) return false;
-  if (Date.now() - startedAt > LOCK_STALE_MS) return false;
-  return processExists(lock.pid);
-}
-
 async function acquireCollectorLock() {
-  const lock = {
-    pid: process.pid,
-    started_at: new Date().toISOString(),
-  };
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await fs.open(LOCK_FILE, 'wx', 0o600);
-      await handle.writeFile(JSON.stringify(lock, null, 2));
-      return async () => {
-        try {
-          await handle.close();
-        } finally {
-          await fs.rm(LOCK_FILE, { force: true });
-        }
-      };
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-
-      const existing = await readJson(LOCK_FILE, null);
-      if (lockIsActive(existing)) {
-        console.log('ai-usage-collect: ya hay una actualización en curso.');
-        return null;
-      }
-
-      await fs.rm(LOCK_FILE, { force: true });
+  try {
+    return await acquireLock(LOCK_FILE);
+  } catch (error) {
+    if (error.code === 'operation_in_progress') {
+      console.log('ai-usage-collect: ya hay una operación en curso.');
+      return null;
     }
+    throw error;
   }
-
-  throw new Error('No pude crear collector.lock.');
 }
 
 function publicError(provider, error) {
@@ -417,13 +332,14 @@ async function collectProvider(
 function buildPrimary(config, status) {
   const providerName = config.primary?.provider ?? 'codex';
   const configuredMetricName = config.primary?.metric ?? 'five_hour';
-  const provider = status[providerName];
+  const provider = status.accounts?.find((account) => account.provider === providerName && account.ok)
+    ?? status[providerName];
   let metricName = configuredMetricName;
   let metric = provider?.[metricName];
   if (!metricHasUsableData(metric)) {
     const fallbackNames = providerName === 'codex'
       ? ['five_hour', 'weekly']
-      : ['session', 'weekly'];
+      : providerName === 'antigravity' ? ['quota', 'session', 'weekly'] : ['session', 'weekly'];
     metricName = fallbackNames.find((name) => metricHasUsableData(provider?.[name])) ?? configuredMetricName;
     metric = provider?.[metricName];
   }
@@ -482,6 +398,8 @@ function providerHasUsableData(provider) {
     metricHasUsableData(provider.five_hour) ||
     metricHasUsableData(provider.weekly) ||
     metricHasUsableData(provider.session) ||
+    metricHasUsableData(provider.quota) ||
+    (provider.quota_windows ?? []).some((window) => metricHasUsableData(window.metric)) ||
     metricHasUsableData(provider.routines) ||
     routinesHasUsableData(provider.daily_routines) ||
     creditsHasUsableData(provider.credits) ||
@@ -542,7 +460,7 @@ function mergeProviderFields(providerName, provider, previousProvider) {
   // una ventana ya no existe (por ejemplo Codex pasó de 5 h + semanal a solo
   // semanal), conservarla desde el snapshot web anterior produciría datos
   // fantasma. El merge parcial se reserva para el parser web tolerante.
-  if (provider.source === 'codex-cli' || provider.source === 'claude-oauth') {
+  if (provider.source === 'codex-cli' || provider.source === 'claude-oauth' || provider.source === 'antigravity-local') {
     return provider;
   }
 
@@ -573,13 +491,12 @@ function mergeProviderFields(providerName, provider, previousProvider) {
 }
 
 function hasAnyProviderData(status) {
-  return providerHasUsableData(status.codex) || providerHasUsableData(status.claude);
+  return (status.accounts ?? [status.codex, status.claude]).some(providerHasUsableData);
 }
 
 function latestProviderUpdatedAt(status) {
-  const timestamps = ['codex', 'claude']
-    .map((providerName) => {
-      const provider = status[providerName];
+  const timestamps = (status.accounts ?? [status.codex, status.claude])
+    .map((provider) => {
       if (!providerHasUsableData(provider)) return null;
       const timestamp = Date.parse(provider.updated_at);
       return Number.isFinite(timestamp) ? timestamp : null;
@@ -609,13 +526,18 @@ function expireElapsedWindows(provider, nowSeconds = Math.floor(Date.now() / 100
     if (hasObtainedValue(metric?.reset_epoch) && metric.reset_epoch <= nowSeconds) {
       next[key] = {
         ...metric,
-        used_percent: 0,
-        remaining_percent: 100,
+        used_percent: provider.source === 'antigravity-local' ? null : 0,
+        remaining_percent: provider.source === 'antigravity-local' ? null : 100,
         reset_label: null,
         reset_epoch: null,
-        state: 'idle',
+        state: provider.source === 'antigravity-local' ? 'unavailable' : 'idle',
       };
     }
+  }
+  if (provider.quota_windows) {
+    next.quota_windows = provider.quota_windows.map((window) => ({
+      ...window, metric: expireElapsedWindows({ ...provider, quota_windows: null, quota: window.metric }, nowSeconds).quota,
+    }));
   }
   return next;
 }
@@ -647,7 +569,7 @@ function mergeProviderResult(providerName, provider, previousStatus, failures, v
   }));
 
   if (previousProvider) {
-    return expireElapsedWindows(previousProvider);
+    return { ...expireElapsedWindows(previousProvider), stale: true, stale_reason: provider.error_code };
   }
 
   // `keep_last` only steers this merge; it is not part of status.json.
@@ -657,13 +579,8 @@ function mergeProviderResult(providerName, provider, previousStatus, failures, v
 
 function lastGoodSnapshot(config, status) {
   const snapshot = JSON.parse(JSON.stringify(status));
-
-  for (const providerName of ['codex', 'claude']) {
-    if (!providerHasUsableData(snapshot[providerName])) {
-      delete snapshot[providerName];
-    }
-  }
-
+  snapshot.accounts = snapshot.accounts.filter((account) => providerHasUsableData(account));
+  updateLegacyProviders(snapshot);
   snapshot.ok = true;
   snapshot.stale = false;
   snapshot.errors = [];
@@ -672,41 +589,31 @@ function lastGoodSnapshot(config, status) {
   return snapshot;
 }
 
-function failureStatusFromPrevious(previousStatus, error, config = DEFAULT_CONFIG) {
+function previousAccount(status, account) {
+  // Never mix snapshots between accounts of the same provider.
+  if (Array.isArray(status?.accounts)) {
+    return status.accounts.find((item) => item.id === account.id);
+  }
+  return account.id === `${account.provider}-default` ? status?.[account.provider] : null;
+}
+
+function failureStatusFromPrevious(previousStatus, error, config = normalizeConfig(DEFAULT_CONFIG)) {
   const now = new Date().toISOString();
-  const errors = [publicError('collector', error)];
-  const fallback = previousStatus
-    ? JSON.parse(JSON.stringify(previousStatus))
-    : null;
-
-  for (const providerName of ['codex', 'claude']) {
-    if (!providerWithinFallbackWindow(
-      fallback?.[providerName],
-      config.thresholds.last_good_valid_minutes,
-    )) {
-      delete fallback?.[providerName];
+  const accounts = config.accounts.map((account) => {
+    if (account.logged_out || !account.enabled) return disconnectedAccount(account);
+    const previous = previousAccount(previousStatus, account);
+    if (providerWithinFallbackWindow(previous, config.thresholds.last_good_valid_minutes)) {
+      return { ...expireElapsedWindows(previous), ...publicAccount(account), stale: true };
     }
-  }
-
-  if (hasAnyProviderData(fallback ?? {})) {
-    fallback.ok = false;
-    fallback.stale = true;
-    fallback.thresholds = config.thresholds;
-    fallback.errors = errors;
-    fallback.updated_at = latestProviderUpdatedAt(fallback) ?? fallback.updated_at ?? now;
-    fallback.primary = buildPrimary(config, fallback);
-    return fallback;
-  }
-
-  return {
-    schema_version: SCHEMA_VERSION,
-    updated_at: now,
-    ok: false,
-    stale: true,
-    thresholds: config.thresholds,
-    primary: { provider: 'none', metric: 'none', used_percent: null, remaining_percent: null, label: '!' },
-    errors,
-  };
+    return { ...publicAccount(account), ...providerFailure(null, error) };
+  });
+  const result = updateLegacyProviders({
+    schema_version: SCHEMA_VERSION, updated_at: now, ok: false, stale: true,
+    thresholds: config.thresholds, accounts,
+    errors: [publicError('collector', error)],
+  });
+  result.primary = buildPrimary(config, result);
+  return result;
 }
 
 async function writeAtomic(file, data) {
@@ -735,7 +642,7 @@ async function main() {
   if (!releaseLock) return;
 
   try {
-    const config = normalizeConfig(await readJson(CONFIG_FILE, null));
+    const config = await loadConfig();
     const previousStatus =
       (await readJson(LAST_GOOD_FILE, null)) ?? (await readJson(OUT_FILE, null));
     providerState = (await readJson(PROVIDER_STATE_FILE, null)) ?? {};
@@ -749,46 +656,42 @@ async function main() {
       primary: null,
       thresholds: config.thresholds,
       errors: [],
+      accounts: [],
     };
 
-    if (config.providers?.codex?.enabled) {
-      const codex = await collectProvider(
-        'codex',
-        config.providers.codex,
-        'cli',
-        fetchCodexCli,
-        parseCodex,
-        CODEX_READY,
+    for (const account of config.accounts) {
+      if (!account.enabled || account.logged_out) {
+        result.accounts.push(disconnectedAccount(account));
+        continue;
+      }
+      const isCodex = account.provider === 'codex';
+      const isGoogle = account.provider === 'antigravity';
+      const collected = await collectProvider(
+        account.id,
+        account.config,
+        isGoogle ? 'local' : isCodex ? 'cli' : 'oauth',
+        isGoogle ? fetchAntigravityLocal : isCodex ? fetchCodexCli : fetchClaudeOAuth,
+        isCodex ? parseCodex : parseClaude,
+        isCodex ? CODEX_READY : CLAUDE_READY,
       );
-      recordProviderOutcome('codex', codex);
-      result.codex = mergeProviderResult(
-        'codex',
-        codex,
-        previousStatus,
-        failures,
-        config.thresholds.last_good_valid_minutes,
+      recordProviderOutcome(account.id, collected);
+      const accountFailures = [];
+      const merged = mergeProviderResult(
+        account.provider, collected,
+        { [account.provider]: previousAccount(previousStatus, account) },
+        accountFailures, config.thresholds.last_good_valid_minutes,
       );
+      failures.push(...accountFailures.map((error) => ({
+        ...error, account_id: account.id, account_label: account.label,
+      })));
+      // Browser sessions can belong to a different identity than the CLI.
+      // Only enrich snapshots actually collected from the matching CLI session.
+      const email = merged.account_email ?? (['codex-cli', 'claude-oauth'].includes(merged.source)
+        ? await readAccountEmail(account) : null);
+      result.accounts.push({ ...merged, ...(email ? { account_email: email } : {}), ...publicAccount(account) });
     }
 
-    if (config.providers?.claude?.enabled) {
-      const claude = await collectProvider(
-        'claude',
-        config.providers.claude,
-        'oauth',
-        fetchClaudeOAuth,
-        parseClaude,
-        CLAUDE_READY,
-      );
-      recordProviderOutcome('claude', claude);
-      result.claude = mergeProviderResult(
-        'claude',
-        claude,
-        previousStatus,
-        failures,
-        config.thresholds.last_good_valid_minutes,
-      );
-    }
-
+    updateLegacyProviders(result);
     result.ok = failures.length === 0;
     result.stale = failures.length > 0;
     result.errors = failures;
@@ -803,9 +706,8 @@ async function main() {
     }
 
     if (process.env.AI_USAGE_QUIET === '1') {
-      const sources = ['codex', 'claude']
-        .filter((name) => result[name])
-        .map((name) => `${name}=${result[name].source}`)
+      const sources = result.accounts
+        .map((account) => `${account.id}=${account.source ?? 'disconnected'}`)
         .join(' ');
       console.log(`ai-usage-collect: ok=${result.ok} ${sources} updated_at=${result.updated_at}`);
     } else {
@@ -819,11 +721,19 @@ async function main() {
 main().catch(async (error) => {
   await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
   await appendErrorLog('collector', error, { phase: 'fatal' });
-  const config = normalizeConfig(await readJson(CONFIG_FILE, null));
-  const previousStatus =
-    (await readJson(LAST_GOOD_FILE, null)) ?? (await readJson(OUT_FILE, null));
-  const fallback = failureStatusFromPrevious(previousStatus, error, config);
-  await writeAtomic(OUT_FILE, fallback);
-  console.error(error);
-  process.exit(1);
+  const release = await acquireLock(LOCK_FILE).catch(() => null);
+  if (release) {
+    try {
+      const config = await loadConfig();
+      const previousStatus =
+        (await readJson(LAST_GOOD_FILE, null)) ?? (await readJson(OUT_FILE, null));
+      await writeAtomic(OUT_FILE, failureStatusFromPrevious(previousStatus, error, config));
+    } catch {
+      // Invalid config must never fall back to reading unrelated global sessions.
+    } finally {
+      await release();
+    }
+  }
+  console.error('ai-usage-collect: no se pudo completar la actualización. Revisa errors.log.');
+  process.exitCode = 1;
 });

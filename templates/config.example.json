@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "primary": {
     "provider": "codex",
     "metric": "five_hour"
@@ -33,6 +33,11 @@
       "headless": true,
       "wait_ms": 8000,
       "debug_text": false
+    },
+    "antigravity": {
+      "enabled": false,
+      "source": "local",
+      "timeout_ms": 8000
     }
   }
 }

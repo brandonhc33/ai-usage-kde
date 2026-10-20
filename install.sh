@@ -84,6 +84,7 @@ chmod 600 ~/.config/ai-usage-status/config.json
 echo "==> Publicando scripts en ~/.local/bin"
 ln -sf "$(pwd)/scripts/ai-usage-collect.mjs" ~/.local/bin/ai-usage-collect
 ln -sf "$(pwd)/scripts/ai-usage-auth.mjs" ~/.local/bin/ai-usage-auth
+ln -sf "$(pwd)/scripts/ai-usage-accounts.mjs" ~/.local/bin/ai-usage-accounts
 ln -sf "$(pwd)/scripts/ai-usage-clear-errors.mjs" ~/.local/bin/ai-usage-clear-errors
 ln -sf "$(pwd)/scripts/ai-usage-doctor.mjs" ~/.local/bin/ai-usage-doctor
 

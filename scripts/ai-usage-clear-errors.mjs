@@ -7,36 +7,15 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { acquireLock } from './lib/accounts.mjs';
 
 const HOME = os.homedir();
 const CACHE_DIR = path.join(HOME, '.cache', 'ai-usage-status');
 const STATUS_FILE = path.join(CACHE_DIR, 'status.json');
 const ERROR_LOG_FILE = path.join(CACHE_DIR, 'errors.log');
 const PROVIDER_STATE_FILE = path.join(CACHE_DIR, 'provider-state.json');
-const LOCK_FILE = path.join(CACHE_DIR, 'collector.lock');
-const LOCK_STALE_MS = 10 * 60 * 1000;
-
-function processExists(pid) {
-  if (!pid) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-}
-
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, 'utf8'));
-}
-
-async function collectorRunning() {
-  const lock = await readJson(LOCK_FILE).catch(() => null);
-  if (!lock) return false;
-  const startedAt = Date.parse(lock.started_at);
-  if (!Number.isFinite(startedAt)) return false;
-  if (Date.now() - startedAt > LOCK_STALE_MS) return false;
-  return processExists(lock.pid);
 }
 
 async function writeAtomic(file, data) {
@@ -46,26 +25,25 @@ async function writeAtomic(file, data) {
 }
 
 async function main() {
-  if (await collectorRunning()) {
-    console.error('ai-usage-clear-errors: hay una actualización en curso.');
-    process.exitCode = 1;
-    return;
+  const release = await acquireLock();
+  try {
+    const status = await readJson(STATUS_FILE);
+
+    status.errors = [];
+    status.stale = false;
+    status.ok = true;
+    status.alert_cleared_at = new Date().toISOString();
+
+    await writeAtomic(STATUS_FILE, status);
+
+    await fs.rm(ERROR_LOG_FILE, { force: true });
+    // Forget known incidents too: otherwise a failure that is still happening
+    // would not be written again to the now empty log (and its web backoff
+    // would keep running).
+    await fs.rm(PROVIDER_STATE_FILE, { force: true });
+  } finally {
+    await release();
   }
-
-  const status = await readJson(STATUS_FILE);
-
-  status.errors = [];
-  status.stale = false;
-  status.ok = true;
-  status.alert_cleared_at = new Date().toISOString();
-
-  await writeAtomic(STATUS_FILE, status);
-
-  await fs.rm(ERROR_LOG_FILE, { force: true });
-  // Forget known incidents too: otherwise a failure that is still happening
-  // would not be written again to the now empty log (and its web backoff
-  // would keep running).
-  await fs.rm(PROVIDER_STATE_FILE, { force: true });
 }
 
 main().catch((error) => {
