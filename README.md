@@ -176,7 +176,10 @@ Claude, give the account a name such as Personal or Work, and choose a connectio
 
 - **Iniciar otra sesión** (Sign in): opens a terminal and the official CLI login.
   Select the intended account in your browser. Requires Codex CLI or Claude Code
-  and Konsole (`x-terminal-emulator` and `xterm` are also supported).
+  and Konsole (`x-terminal-emulator` and `xterm` are also supported). The
+  browser signs in with the account it already has open: switch accounts on
+  claude.ai or chatgpt.com first. A login that lands on an account already
+  connected in the widget is rejected and names the card it repeats.
 - **Importar la sesión actual de la CLI** (Import current CLI session): copies
   the current local file credentials. For Codex sessions stored exclusively in
   the keyring, use a new sign-in instead.
@@ -191,8 +194,17 @@ Removing an account also removes its card.
 Existing provider configurations continue to appear as Principal accounts.
 Disconnecting these from the widget preserves sessions used by other apps.
 New accounts use separate `CODEX_HOME` or `CLAUDE_CONFIG_DIR` directories.
-Claude credentials can expire; use the sign-in action on the account card to
-renew them.
+Claude Code only renews tokens it uses, so the collector renews the 8-hour
+token of Claude accounts signed in from the widget by itself. It never renews
+the global `~/.claude` session or an imported copy of it: renewing rotates the
+refresh token and would sign out Claude Code. Those keep the last data until
+Claude Code runs; prefer **Iniciar otra sesión** for extra Claude accounts.
+Claude accounts signed in with an earlier widget version need one more sign-in
+from the card to be renewed automatically.
+
+If two cards resolve to the same provider account, for example because the
+global CLI switched to an account that already has its own card, the repeated
+card names the card it repeats instead of copying its usage.
 
 Use each card's **pin** to select which accounts appear in the panel. Selection
 is saved per widget instance. **The expanded view always shows every account**,

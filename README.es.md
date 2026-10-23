@@ -180,7 +180,10 @@ un nombre (por ejemplo, «Personal» o «Trabajo») y selecciona cómo conectarl
 
 - **Iniciar otra sesión:** abre Konsole y el inicio de sesión oficial de la CLI.
   Elige la cuenta correspondiente en el navegador. Requiere Codex CLI o Claude
-  Code y Konsole (también admite `x-terminal-emulator` o `xterm`).
+  Code y Konsole (también admite `x-terminal-emulator` o `xterm`). El navegador
+  inicia sesión con la cuenta que ya tiene abierta: cámbiala antes en claude.ai
+  o chatgpt.com. Si el inicio de sesión cae en una cuenta que ya está en el
+  widget, se rechaza e indica qué tarjeta repite.
 - **Importar la sesión actual de la CLI:** guarda una copia de las credenciales
   locales actuales. La sesión debe estar guardada en archivos; si Codex usa
   exclusivamente el llavero, utiliza el inicio de sesión nuevo.
@@ -195,8 +198,19 @@ tarjeta para poder reconectarla. Eliminar también quita la tarjeta.
 Las cuentas de la configuración anterior siguen apareciendo automáticamente
 como «Principal». Desconectarlas del widget no borra las sesiones de otras
 aplicaciones. Las cuentas añadidas desde el widget usan un directorio propio
-mediante `CODEX_HOME` o `CLAUDE_CONFIG_DIR`. Las credenciales de Claude pueden
-expirar: usa **Iniciar sesión** en la tarjeta para renovarlas.
+mediante `CODEX_HOME` o `CLAUDE_CONFIG_DIR`. Claude Code solo renueva los
+tokens que usa, así que el recolector renueva por su cuenta el token de 8 horas
+de las cuentas de Claude iniciadas desde el widget. Nunca renueva la sesión
+global `~/.claude` ni una copia importada de ella: renovar rota el token de
+refresco y cerraría la sesión de Claude Code. Esas cuentas conservan los últimos
+datos hasta que uses Claude Code; para cuentas adicionales de Claude, prefiere
+**Iniciar otra sesión**. Las cuentas de Claude iniciadas con una versión
+anterior del widget necesitan un nuevo **Iniciar sesión** desde la tarjeta para
+renovarse solas.
+
+Si dos tarjetas corresponden a la misma cuenta del proveedor (por ejemplo,
+porque la CLI global cambió a una cuenta que ya tiene su propia tarjeta), la
+tarjeta repetida indica a qué tarjeta corresponde en vez de copiar su uso.
 
 Usa la **chincheta** de cada tarjeta para elegir qué cuentas aparecen en la
 barra. La selección se guarda por instancia del widget. **Al abrir el
