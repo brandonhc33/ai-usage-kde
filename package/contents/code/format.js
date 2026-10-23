@@ -515,6 +515,9 @@ function providerErrorMessage(name, provider) {
         return "Abre Antigravity e inicia sesión con Google para consultar su uso.";
     case "account_mismatch":
         return "El CLI y la app de Antigravity tienen abierta otra cuenta de Google.";
+    case "duplicate_account":
+        return "Esta sesión es la misma cuenta que «" + (provider.duplicate_of || "otra tarjeta")
+            + "». Inicia sesión con la otra cuenta (cámbiala antes en el navegador).";
     case "quota_unavailable":
         return "Antigravity todavía no informó sus cuotas. Actualiza la aplicación y vuelve a intentar.";
     case "login_required":

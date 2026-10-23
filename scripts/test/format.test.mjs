@@ -305,3 +305,8 @@ test('a missing CLI asks to install it and stale Antigravity data keeps the acti
   assert.match(Format.providerNotice(stale), /^Inicia sesión en el CLI de Antigravity.*Se conservan los últimos datos/);
   assert.match(Format.providerSubtitle(stale, NOW), /^CLI · /);
 });
+
+test('a duplicated account names the card it repeats and asks for the other login', () => {
+  assert.match(Format.providerErrorMessage('Claude', { provider: 'claude', error_code: 'duplicate_account', duplicate_of: 'Trabajo' }),
+    /^Esta sesión es la misma cuenta que «Trabajo»\. Inicia sesión con la otra cuenta/);
+});
