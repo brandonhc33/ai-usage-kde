@@ -88,6 +88,12 @@ export function normalizeConfig(value) {
           profile_dir: path.join(directory, 'browser'),
         });
       }
+      if (account.provider === 'claude') {
+        // Renewing rotates the refresh token and breaks every other copy of
+        // it. Only a login made by the widget itself sets this (see the
+        // `login` command); never inherited from `providers`.
+        settings.oauth_refresh = account.managed === true && account.config?.oauth_refresh === true;
+      }
       return {
         ...account,
         label: String(account.label || 'Principal').trim().slice(0, 60),

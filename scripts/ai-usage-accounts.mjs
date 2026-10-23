@@ -13,6 +13,7 @@ import {
 } from './lib/accounts.mjs';
 import { resolveCodexCommand } from './lib/structured-sources.mjs';
 import { fetchAntigravity } from './lib/antigravity.mjs';
+import { readAccountIdentity } from './lib/account-identity.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 
@@ -25,6 +26,19 @@ function accountById(config, id) {
 function loginLock(id) {
   validateAccount({ id, provider: 'codex' });
   return path.join(CACHE_DIR, `login-${id}.lock`);
+}
+
+// The terminal runs `login` in a separate process; its failure reason is
+// handed back to terminalLogin() through this file.
+function loginErrorFile(id) {
+  validateAccount({ id, provider: 'codex' });
+  return path.join(CACHE_DIR, `login-${id}.error`);
+}
+
+// JSON parser errors may contain credential fragments. Only display known
+// operational messages; never serialize arbitrary files or error objects.
+function publicMessage(error) {
+  return error instanceof SyntaxError ? 'No se pudo leer un archivo de configuración o sesión.' : error.message;
 }
 
 async function assertNotLoggingIn(id) {
@@ -137,10 +151,34 @@ async function terminalLogin(id) {
     ?? await executable('xterm');
   if (!terminal) throw new Error('Instala Konsole para iniciar sesión desde el widget.');
   const args = path.basename(terminal) === 'konsole' ? ['--nofork'] : [];
-  await run(terminal, [...args, '-e', process.execPath, scriptPath, 'login', id], { stdio: 'ignore' });
+  const errorFile = loginErrorFile(id);
+  await fs.rm(errorFile, { force: true });
+  let failure = null;
+  await run(terminal, [...args, '-e', process.execPath, scriptPath, 'login', id], { stdio: 'ignore' })
+    .catch((error) => { failure = error; });
+  const reason = (await fs.readFile(errorFile, 'utf8').catch(() => '')).trim();
+  await fs.rm(errorFile, { force: true });
+  if (reason) throw new Error(reason);
+  if (failure) throw failure;
   const account = accountById(await loadConfig(), id);
   if (account.logged_out) throw new Error('El inicio de sesión no se completó. Puedes reintentarlo desde la cuenta.');
   return publicAccount(account);
+}
+
+// The browser signs in with whatever account it already has open, which may
+// be one connected here; both cards would then show the same usage.
+async function assertNewIdentity(config, id) {
+  const account = accountById(config, id);
+  const identity = await readAccountIdentity({ ...account, logged_out: false });
+  if (!identity) return;
+  for (const other of config.accounts) {
+    if (other.id === id || other.provider !== account.provider || !other.managed) continue;
+    if ((await readAccountIdentity(other))?.key === identity.key) {
+      const site = account.provider === 'claude' ? 'claude.ai' : 'chatgpt.com';
+      throw new Error(`Iniciaste sesión con ${identity.email ?? 'una cuenta'}, que ya está conectada como «${other.label}». `
+        + `Cambia de cuenta en ${site} y vuelve a intentarlo.`);
+    }
+  }
 }
 
 async function login(id, inTerminal) {
@@ -194,14 +232,20 @@ async function login(id, inTerminal) {
       if (!auth?.claudeAiOauth?.accessToken) throw new Error('Claude no guardó la sesión.');
       await fs.chmod(path.join(directory, '.credentials.json'), 0o600);
     }
+    await assertNewIdentity(await loadConfig(), id);
     const result = await mutate((config) => {
       const selected = accountById(config, id);
       selected.logged_out = false;
       selected.enabled = true;
+      // This session exists only here, so the collector may renew it.
+      if (selected.provider === 'claude') selected.config = { ...selected.config, oauth_refresh: true };
       return publicAccount(selected);
     }, id, true);
     connected = true;
     return result;
+  } catch (error) {
+    await fs.writeFile(loginErrorFile(id), publicMessage(error), { mode: 0o600 }).catch(() => {});
+    throw error;
   } finally {
     if (directory && !connected) await fs.rm(directory, { recursive: true, force: true });
     await releaseLogin();
@@ -267,10 +311,7 @@ export async function main(args = process.argv.slice(2)) {
 
 if (process.argv[1] && await fs.realpath(process.argv[1]).catch(() => '') === scriptPath) {
   main().then((result) => console.log(JSON.stringify(result))).catch((error) => {
-    // JSON parser errors may contain credential fragments. Only display known
-    // operational messages; never serialize arbitrary files or error objects.
-    const message = error instanceof SyntaxError ? 'No se pudo leer un archivo de configuración o sesión.' : error.message;
-    console.error(message);
+    console.error(publicMessage(error));
     process.exitCode = 1;
   });
 }

@@ -3,9 +3,15 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { writeAtomic } from './accounts.mjs';
 
 const HOME = os.homedir();
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+// Claude Code's own OAuth client: the managed sessions were issued to it.
+const CLAUDE_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+// Renew a little early so the token cannot expire between renewal and use.
+const CLAUDE_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 // GET only: the same balance read Claude Code does for its usage screen. The
 // sibling POST .../contracts/prepaid/credits *buys* credits; never call it.
 const CLAUDE_PREPAID_URL = 'https://api.anthropic.com/api/oauth/organizations/{org}/prepaid/credits';
@@ -484,6 +490,53 @@ async function fetchClaudePrepaid(config, accessToken) {
   }
 }
 
+// Access tokens last 8 h and every renewal rotates the refresh token, which
+// invalidates any other copy of it. That is why only sessions the widget
+// signed in to itself (`oauth_refresh`) are renewed here: the global
+// ~/.claude session and imported copies of it belong to Claude Code.
+async function refreshClaudeCredentials(credentialsPath, root, timeoutMs) {
+  const credentials = root.claudeAiOauth;
+  let response;
+  try {
+    response = await fetchWithTimeout(CLAUDE_TOKEN_URL, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: credentials.refreshToken,
+        client_id: CLAUDE_OAUTH_CLIENT_ID,
+        scope: (credentials.scopes ?? []).join(' '),
+      }),
+    }, timeoutMs);
+  } catch (error) {
+    throw sourceError(`Claude OAuth no respondió al renovar la sesión: ${error.message}`, 'network_error');
+  }
+
+  const data = await response.json().catch(() => null);
+  if (data?.error === 'invalid_grant') {
+    // A rejected refresh token never works again. Forget it so later runs ask
+    // for a new login instead of retrying it every two minutes.
+    await writeAtomic(credentialsPath, { ...root, claudeAiOauth: { ...credentials, refreshToken: '' } });
+    throw sourceError('La sesión de Claude se cerró o caducó.', 'login_required');
+  }
+  if (response.status === 429) throw sourceError('Claude OAuth limitó temporalmente las renovaciones.', 'rate_limited');
+  if (!response.ok) throw sourceError(`Claude OAuth respondió HTTP ${response.status} al renovar la sesión.`, 'network_error');
+
+  const expiresIn = finiteNumber(data?.expires_in);
+  if (typeof data?.access_token !== 'string' || expiresIn === null) {
+    throw sourceError('Claude OAuth devolvió una renovación incompleta.', 'invalid_response');
+  }
+  const renewed = {
+    ...credentials,
+    accessToken: data.access_token,
+    refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credentials.refreshToken,
+    expiresAt: Date.now() + expiresIn * 1000,
+    ...(typeof data.scope === 'string' ? { scopes: data.scope.split(' ').filter(Boolean) } : {}),
+  };
+  await writeAtomic(credentialsPath, { ...root, claudeAiOauth: renewed });
+  return renewed;
+}
+
 export async function fetchClaudeOAuth(config = {}) {
   const credentialsPath = expandHome(
     config.oauth_credentials_file ?? '~/.claude/.credentials.json',
@@ -496,22 +549,38 @@ export async function fetchClaudeOAuth(config = {}) {
     throw sourceError('No pude leer las credenciales OAuth de esta cuenta de Claude.');
   }
 
-  const credentials = root?.claudeAiOauth;
+  let credentials = root?.claudeAiOauth;
   if (!credentials?.accessToken) throw sourceError('Las credenciales de Claude no incluyen OAuth.');
   if (!credentials.scopes?.includes('user:profile')) {
     throw sourceError('El token de Claude no tiene el scope user:profile.', 'oauth_scope_missing');
   }
-  if (Number(credentials.expiresAt) <= Date.now()) {
-    throw sourceError('El token OAuth de Claude expiró.', 'oauth_expired');
+  const timeoutMs = Number(config.oauth_timeout_ms) || 30_000;
+  const refreshable = config.oauth_refresh === true;
+  let renewed = false;
+  const renew = async () => {
+    if (!credentials.refreshToken) throw sourceError('La sesión de Claude se cerró o caducó.', 'login_required');
+    credentials = await refreshClaudeCredentials(credentialsPath, root, timeoutMs);
+    renewed = true;
+  };
+  if (Number(credentials.expiresAt) - Date.now() <= (refreshable ? CLAUDE_REFRESH_MARGIN_MS : 0)) {
+    if (!refreshable) throw sourceError('El token OAuth de Claude expiró.', 'oauth_expired');
+    await renew();
   }
 
-  let response;
-  try {
-    response = await fetchWithTimeout(CLAUDE_USAGE_URL, {
-      headers: claudeHeaders(credentials.accessToken),
-    }, Number(config.oauth_timeout_ms) || 30_000);
-  } catch (error) {
-    throw sourceError(`Claude OAuth no respondió: ${error.message}`, 'network_error');
+  const requestUsage = async () => {
+    try {
+      return await fetchWithTimeout(CLAUDE_USAGE_URL, {
+        headers: claudeHeaders(credentials.accessToken),
+      }, timeoutMs);
+    } catch (error) {
+      throw sourceError(`Claude OAuth no respondió: ${error.message}`, 'network_error');
+    }
+  };
+  let response = await requestUsage();
+  // The server can revoke an access token before it expires.
+  if (response.status === 401 && refreshable && !renewed) {
+    await renew();
+    response = await requestUsage();
   }
 
   if (response.status === 401) throw sourceError('Claude OAuth requiere iniciar sesión.', 'login_required');

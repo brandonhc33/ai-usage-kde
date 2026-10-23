@@ -15,7 +15,7 @@ import {
 } from './lib/provider-state.mjs';
 import { fetchClaudeOAuth, fetchCodexCli } from './lib/structured-sources.mjs';
 import { fetchAntigravity } from './lib/antigravity.mjs';
-import { readAccountEmail } from './lib/account-identity.mjs';
+import { findDuplicateAccounts, readAccountIdentity } from './lib/account-identity.mjs';
 import {
   DEFAULT_CONFIG, normalizeConfig, publicAccount, disconnectedAccount, acquireLock, loadConfig,
   updateLegacyProviders,
@@ -663,9 +663,10 @@ async function main() {
       accounts: [],
     };
 
+    const collectedAccounts = [];
     for (const account of config.accounts) {
       if (!account.enabled || account.logged_out) {
-        result.accounts.push(disconnectedAccount(account));
+        collectedAccounts.push({ account, status: disconnectedAccount(account) });
         continue;
       }
       const isCodex = account.provider === 'codex';
@@ -689,11 +690,25 @@ async function main() {
         ...error, account_id: account.id, account_label: account.label,
       })));
       // Browser sessions can belong to a different identity than the CLI.
-      // Only enrich snapshots actually collected from the matching CLI session.
-      const email = merged.account_email ?? (['codex-cli', 'claude-oauth'].includes(merged.source)
-        ? await readAccountEmail(account) : null);
-      result.accounts.push({ ...merged, ...(email ? { account_email: email } : {}), ...publicAccount(account) });
+      // Only identify snapshots actually collected from the matching CLI session.
+      const identity = !merged.account_email && ['codex-cli', 'claude-oauth'].includes(merged.source)
+        ? await readAccountIdentity(account) : null;
+      const email = merged.account_email ?? identity?.email;
+      collectedAccounts.push({
+        account, identity,
+        status: { ...merged, ...(email ? { account_email: email } : {}), ...publicAccount(account) },
+      });
     }
+
+    // A repeated identity would show another card's usage as its own.
+    const duplicates = findDuplicateAccounts(collectedAccounts);
+    result.accounts = collectedAccounts.map(({ account, status }) => (duplicates.has(account.id)
+      ? {
+        ...publicAccount(account), ok: false, source: status.source, updated_at: status.updated_at,
+        error_code: 'duplicate_account', duplicate_of: duplicates.get(account.id),
+        ...(status.account_email ? { account_email: status.account_email } : {}),
+      }
+      : status));
 
     updateLegacyProviders(result);
     result.ok = failures.length === 0;

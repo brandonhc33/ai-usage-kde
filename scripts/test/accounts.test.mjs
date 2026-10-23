@@ -68,6 +68,18 @@ test('managed accounts always resolve to independent credentials and never to we
   assert.match(accounts[0].config.oauth_credentials_file, /accounts\/personal\/\.credentials.json$/);
 });
 
+test('only Claude sessions signed in by the widget may renew their token', () => {
+  const { accounts } = normalizeConfig({
+    providers: { claude: { oauth_refresh: true } },
+    accounts: [
+      { id: 'own', provider: 'claude', managed: true, config: { oauth_refresh: true } },
+      { id: 'imported', provider: 'claude', managed: true },
+      { id: 'global', provider: 'claude', managed: false, config: { oauth_refresh: true } },
+    ],
+  });
+  assert.deepEqual(accounts.map((account) => account.config.oauth_refresh), [true, false, false]);
+});
+
 test('imports two Claude identities, renames, logs out and removes without changing global CLI credentials', async (t) => {
   const f = await fixture(t);
   const globalFile = path.join(f.home, '.claude/.credentials.json');
@@ -183,6 +195,41 @@ test('collector keeps two Claude accounts and their last-good snapshots separate
   assert.deepEqual(accounts.map((a) => a.account_email), ['personal@example.test', 'work@example.test']);
 });
 
+test('collector flags a card that repeats another account instead of mirroring its usage', async (t) => {
+  const f = await fixture(t);
+  f.config.accounts = [
+    { id: 'global', provider: 'claude', label: 'Global', managed: false,
+      config: { source: 'oauth', oauth_credentials_file: path.join(f.home, '.claude/.credentials.json') } },
+    ...['work', 'personal', 'copy'].map((id) => ({ id, provider: 'claude', label: id, managed: true })),
+  ];
+  await fs.writeFile(f.configFile, JSON.stringify(f.config));
+  const owners = { global: 'uuid-work', work: 'uuid-work', personal: 'uuid-personal', copy: 'uuid-personal' };
+  for (const [id, uuid] of Object.entries(owners)) {
+    const dir = id === 'global' ? path.join(f.home, '.claude') : path.join(f.home, '.config/ai-usage-status/accounts', id);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: {
+      accessToken: id, expiresAt: Date.now() + 3_600_000, scopes: ['user:profile'],
+    } }));
+    await fs.writeFile(id === 'global' ? path.join(f.home, '.claude.json') : path.join(dir, '.claude.json'),
+      JSON.stringify({ oauthAccount: { emailAddress: `${uuid}@example.test`, accountUuid: uuid, organizationUuid: 'org' } }));
+  }
+  const preload = path.join(f.home, 'mock-fetch.cjs');
+  await fs.writeFile(preload, `globalThis.fetch = async () => new Response(JSON.stringify({
+    five_hour: { utilization: 5, resets_at: new Date(Date.now() + 3600000).toISOString() }
+  }), { status: 200 });`);
+  const result = f.run(collector, [], { NODE_OPTIONS: `--require=${preload}` });
+  assert.equal(result.status, 0, result.stderr);
+  const accounts = JSON.parse(result.stdout).accounts;
+  // The widget's own session wins over the global one, then config order.
+  assert.deepEqual(accounts.map((a) => [a.id, a.ok, a.error_code ?? null, a.duplicate_of ?? null]), [
+    ['global', false, 'duplicate_account', 'work'],
+    ['work', true, null, null],
+    ['personal', true, null, null],
+    ['copy', false, 'duplicate_account', 'personal'],
+  ]);
+  assert.equal(accounts[3].session, undefined);
+});
+
 test('Codex app-server receives the selected account home and an isolated credential store', async (t) => {
   const f = await fixture(t);
   const mockCli = path.join(f.home, 'mock-codex');
@@ -245,6 +292,8 @@ const dir = process.env.CLAUDE_CONFIG_DIR;
 if (!dir.includes('/ai-usage-status/accounts/')) process.exit(2);
 if (process.env.ANTHROPIC_API_KEY) process.exit(3);
 fs.writeFileSync(dir+'/.credentials.json', JSON.stringify({claudeAiOauth: {accessToken:'fake-isolated'}}));
+const uuid = process.env.FAKE_CLAUDE_ACCOUNT;
+if (uuid) fs.writeFileSync(dir+'/.claude.json', JSON.stringify({oauthAccount: {accountUuid: uuid, emailAddress: uuid+'@example.test'}}));
 `, { mode: 0o700 });
   await fs.writeFile(path.join(bin, 'codex'), `#!${process.execPath}
 const fs = require('node:fs');
@@ -263,7 +312,38 @@ fs.writeFileSync(dir+'/auth.json', JSON.stringify({tokens: {access_token:'fake-i
     f.account('logout', account.id);
     f.account('login', account.id, '--terminal');
     assert.equal(f.account('list').find((item) => item.id === account.id).logged_out, false);
+    // Claude Code never renews these sessions; the collector may.
+    assert.equal((await f.json(f.configFile)).accounts.find((item) => item.id === account.id).config.oauth_refresh,
+      provider === 'claude' ? true : undefined);
   }
+});
+
+test('a browser login that lands on an already connected account is rejected with the reason', async (t) => {
+  const f = await fixture(t);
+  const bin = path.join(f.home, '.local/bin');
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(path.join(bin, 'konsole'), `#!${process.execPath}
+const {spawnSync} = require('node:child_process');
+const args = process.argv.slice(process.argv.indexOf('-e') + 1);
+process.exit(spawnSync(args[0], args.slice(1), {stdio: 'ignore'}).status ?? 1);
+`, { mode: 0o700 });
+  await fs.writeFile(path.join(bin, 'claude'), `#!${process.execPath}
+const fs = require('node:fs');
+const dir = process.env.CLAUDE_CONFIG_DIR;
+fs.writeFileSync(dir+'/.credentials.json', JSON.stringify({claudeAiOauth: {accessToken:'fake'}}));
+fs.writeFileSync(dir+'/.claude.json', JSON.stringify({oauthAccount: {accountUuid: 'same', emailAddress: 'work@example.test'}}));
+`, { mode: 0o700 });
+  const first = f.account('add', 'claude', 'Trabajo', '--login');
+  assert.equal(first.logged_out, false);
+  const result = f.run(manager, ['add', 'claude', 'Personal', '--login']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /work@example\.test, que ya está conectada como «Trabajo»\. Cambia de cuenta en claude\.ai/);
+  const second = f.account('list').find((item) => item.label === 'Personal');
+  assert.equal(second.logged_out, true);
+  await assert.rejects(fs.access(path.join(f.home, '.config/ai-usage-status/accounts', second.id)));
+  await assert.rejects(fs.access(path.join(f.cache, `login-${second.id}.error`)));
+  // Signing in again to the same card is not a duplicate of itself.
+  f.account('login', first.id, '--terminal');
 });
 
 test('account CLI also works when launched through an installed symlink', async (t) => {

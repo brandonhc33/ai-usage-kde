@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import {
+  fetchClaudeOAuth,
   mapClaudeOAuthUsage,
   mapCodexRateLimits,
 } from '../lib/structured-sources.mjs';
@@ -207,4 +211,83 @@ test('keeps Codex credits at zero and exposes free rate-limit resets', () => {
   });
   assert.equal(result.limit_reached, false);
   assert.equal(result.five_hour.state, 'active');
+});
+
+// A managed Claude session on disk plus a fake Anthropic API that records
+// every request: renewals go to the token URL, usage reads to the usage URL.
+async function claudeSession(t, oauth, usageStatus = () => 200) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-usage-oauth-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, '.credentials.json');
+  await fs.writeFile(file, JSON.stringify({ claudeAiOauth: {
+    accessToken: 'old-access', refreshToken: 'old-refresh', scopes: ['user:inference', 'user:profile'],
+    subscriptionType: 'pro', ...oauth,
+  }, other: 'kept' }));
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ url, body, authorization: options.headers?.Authorization });
+    if (url.endsWith('/v1/oauth/token')) {
+      if (body.refresh_token === 'dead-refresh') {
+        return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+      }
+      return new Response(JSON.stringify({
+        access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 28800,
+        scope: 'user:inference user:profile',
+      }), { status: 200 });
+    }
+    const status = usageStatus(options.headers.Authorization);
+    return new Response(status === 200
+      ? JSON.stringify({ five_hour: { utilization: 40, resets_at: '2026-10-23T20:00:00Z' } })
+      : '{}', { status });
+  };
+  const read = async () => JSON.parse(await fs.readFile(file, 'utf8'));
+  return { file, requests, read };
+}
+
+test('renews an expired managed Claude session and saves the rotated tokens', async (t) => {
+  const session = await claudeSession(t, { expiresAt: Date.now() - 1000 });
+  const result = await fetchClaudeOAuth({ oauth_credentials_file: session.file, oauth_refresh: true });
+  assert.equal(result.session.used_percent, 40);
+  assert.deepEqual(session.requests.map((request) => new URL(request.url).pathname),
+    ['/v1/oauth/token', '/api/oauth/usage']);
+  assert.deepEqual(session.requests[0].body, {
+    grant_type: 'refresh_token', refresh_token: 'old-refresh',
+    client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e', scope: 'user:inference user:profile',
+  });
+  assert.equal(session.requests[1].authorization, 'Bearer new-access');
+  const saved = await session.read();
+  assert.equal(saved.other, 'kept');
+  assert.equal(saved.claudeAiOauth.accessToken, 'new-access');
+  assert.equal(saved.claudeAiOauth.refreshToken, 'new-refresh');
+  assert.equal(saved.claudeAiOauth.subscriptionType, 'pro');
+  assert.ok(saved.claudeAiOauth.expiresAt > Date.now() + 7 * 3600 * 1000);
+  assert.equal((await fs.stat(session.file)).mode & 0o777, 0o600);
+});
+
+test('never renews a Claude session the widget does not own', async (t) => {
+  const session = await claudeSession(t, { expiresAt: Date.now() - 1000 });
+  await assert.rejects(fetchClaudeOAuth({ oauth_credentials_file: session.file }), { code: 'oauth_expired' });
+  assert.equal(session.requests.length, 0);
+  assert.equal((await session.read()).claudeAiOauth.refreshToken, 'old-refresh');
+});
+
+test('a rejected refresh token asks for a new login once instead of retrying it', async (t) => {
+  const session = await claudeSession(t, { expiresAt: Date.now() - 1000, refreshToken: 'dead-refresh' });
+  const config = { oauth_credentials_file: session.file, oauth_refresh: true };
+  await assert.rejects(fetchClaudeOAuth(config), { code: 'login_required' });
+  assert.equal((await session.read()).claudeAiOauth.refreshToken, '');
+  await assert.rejects(fetchClaudeOAuth(config), { code: 'login_required' });
+  assert.equal(session.requests.length, 1);
+});
+
+test('renews once when Claude revokes a managed access token before it expires', async (t) => {
+  const session = await claudeSession(t, { expiresAt: Date.now() + 3600 * 1000 },
+    (authorization) => (authorization === 'Bearer old-access' ? 401 : 200));
+  const result = await fetchClaudeOAuth({ oauth_credentials_file: session.file, oauth_refresh: true });
+  assert.equal(result.session.used_percent, 40);
+  assert.deepEqual(session.requests.map((request) => new URL(request.url).pathname),
+    ['/api/oauth/usage', '/v1/oauth/token', '/api/oauth/usage']);
 });
